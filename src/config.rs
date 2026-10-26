@@ -86,6 +86,10 @@ fn default_port() -> u16 {
 }
 
 pub fn path() -> PathBuf {
+    // A second copy for development can run with its own identity.
+    if let Some(p) = std::env::var_os("CROSSDESK_CONFIG") {
+        return PathBuf::from(p);
+    }
     match directories::ProjectDirs::from("com", "crossdesk", "Crossdesk") {
         Some(d) => d.config_dir().join("config.json"),
         None => PathBuf::from("crossdesk-config.json"),

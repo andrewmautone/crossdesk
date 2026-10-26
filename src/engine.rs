@@ -28,6 +28,8 @@ struct EdgeHit {
     monitor: usize,
     entry: (f64, f64),
     pt: (i32, i32),
+    /// When the cursor started resting on this edge.
+    since: Instant,
 }
 
 /// How hard the user has pushed against an edge so far.
@@ -195,6 +197,23 @@ impl Engine {
 
     /// Raw mouse movement, reported even when the cursor is pinned against an edge
     /// (Raw Input on Windows, event deltas on macOS). Only used to measure the push.
+    /// Fallback when raw movement is unavailable: keeping the cursor moving against
+    /// the edge for a while (3 ms per pixel of resistance) counts as the push.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn on_edge_dwell(&mut self) -> Decision {
+        if self.remote.is_some() {
+            return Decision::default();
+        }
+        let Some(hit) = self.edge.clone() else {
+            return Decision::default();
+        };
+        let needed = Duration::from_millis((self.resistance() * 3.0) as u64);
+        if hit.since.elapsed() < needed {
+            return Decision::default();
+        }
+        self.enter_remote(hit.monitor, hit.entry, hit.pt)
+    }
+
     pub fn on_push_delta(&mut self, dx: f64, dy: f64) -> Decision {
         if self.remote.is_some() {
             return Decision::default();
@@ -256,11 +275,16 @@ impl Engine {
                 return self.enter_remote(j, entry, pt);
             }
             // Resting on the edge: wait for enough push (see on_push_delta).
+            let since = match &self.edge {
+                Some(e) if e.dir == dir => e.since,
+                _ => Instant::now(),
+            };
             self.edge = Some(EdgeHit {
                 dir,
                 monitor: j,
                 entry,
                 pt,
+                since,
             });
             return Decision::default();
         }
@@ -584,6 +608,22 @@ mod tests {
         let d = e.on_move((0, 0), Some((-60.0, 0.0)));
         assert!(d.release_to.is_some());
         assert_eq!(e.active_target(), None);
+    }
+
+    #[test]
+    fn dwelling_on_the_edge_crosses_without_raw_input() {
+        let (mut e, _rx) = setup();
+        e.set_settings(Settings {
+            clipboard_sync: false,
+            edge_resistance: 10,
+            ..Settings::default()
+        });
+        e.on_move((1919, 600), None);
+        assert!(!e.on_edge_dwell().block);
+        std::thread::sleep(Duration::from_millis(40));
+        e.on_move((1919, 601), None);
+        assert!(e.on_edge_dwell().block);
+        assert_eq!(e.active_target(), Some("mac"));
     }
 
     #[test]

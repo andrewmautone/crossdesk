@@ -5,8 +5,9 @@ use crate::layout::Monitor;
 use crate::protocol::Button;
 use crate::state::Shared;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use windows::core::w;
 use windows::Win32::Foundation::{BOOL, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Foundation::{HINSTANCE, HWND};
@@ -32,6 +33,20 @@ static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
 /// and every hook event is measured against it to get the movement delta.
 static PARK: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 static HIDDEN: AtomicBool = AtomicBool::new(false);
+/// Milliseconds (since START) of the last raw mouse report; 0 = none yet.
+static LAST_RAW: AtomicU64 = AtomicU64::new(0);
+static RAW_SEEN: AtomicBool = AtomicBool::new(false);
+static START: OnceLock<Instant> = OnceLock::new();
+
+fn now_ms() -> u64 {
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+/// Raw input is flowing, so the push can be measured in pixels.
+fn raw_alive() -> bool {
+    let last = LAST_RAW.load(Ordering::Relaxed);
+    last != 0 && now_ms() - last < 3000
+}
 
 pub fn init_process() {
     unsafe {
@@ -184,7 +199,12 @@ fn handle_mouse(msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
             let delta = PARK
                 .lock()
                 .map(|p| ((pt.0 - p.0) as f64, (pt.1 - p.1) as f64));
-            let d = s.engine.lock().on_move(pt, delta);
+            let mut engine = s.engine.lock();
+            let mut d = engine.on_move(pt, delta);
+            if delta.is_none() && d == Decision::default() && !raw_alive() {
+                d = engine.on_edge_dwell();
+            }
+            drop(engine);
             apply(d)
         }
         WM_LBUTTONDOWN => button(Button::Left, true),
@@ -272,7 +292,20 @@ unsafe fn raw_input_window(hinst: HINSTANCE) -> windows::core::Result<HWND> {
         hwndTarget: hwnd,
     };
     RegisterRawInputDevices(&[device], std::mem::size_of::<RAWINPUTDEVICE>() as u32)?;
+    // Raw input is registered per process, and the UI toolkit registers its own
+    // window later, taking the mouse over. Take it back every second.
+    SetTimer(hwnd, 1, 1000, None);
     Ok(hwnd)
+}
+
+unsafe fn claim_raw_input(hwnd: HWND) {
+    let device = RAWINPUTDEVICE {
+        usUsagePage: 0x01,
+        usUsage: 0x02,
+        dwFlags: RIDEV_INPUTSINK,
+        hwndTarget: hwnd,
+    };
+    let _ = RegisterRawInputDevices(&[device], std::mem::size_of::<RAWINPUTDEVICE>() as u32);
 }
 
 unsafe extern "system" fn raw_input_proc(
@@ -283,6 +316,13 @@ unsafe extern "system" fn raw_input_proc(
 ) -> LRESULT {
     if msg == WM_INPUT {
         handle_raw(HRAWINPUT(lparam.0 as _));
+    } else if msg == WM_TIMER && !raw_alive() {
+        claim_raw_input(hwnd);
+    }
+    if msg == WM_INPUT && !RAW_SEEN.swap(true, Ordering::Relaxed) {
+        if let Some(s) = shared() {
+            s.log("raw mouse input is flowing (edge push measured in pixels)");
+        }
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
@@ -305,6 +345,7 @@ unsafe fn handle_raw(handle: HRAWINPUT) {
     if n == u32::MAX || raw.header.dwType != RIM_TYPEMOUSE.0 || raw.header.hDevice.0.is_null() {
         return;
     }
+    LAST_RAW.store(now_ms(), Ordering::Relaxed);
     let mouse = raw.data.mouse;
     if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 || (mouse.lLastX == 0 && mouse.lLastY == 0) {
         return;
