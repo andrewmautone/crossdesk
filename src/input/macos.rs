@@ -19,7 +19,7 @@ use core_graphics::event::{
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use parking_lot::Mutex;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -30,6 +30,19 @@ static TAP_PORT: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut
 static FROZEN: AtomicBool = AtomicBool::new(false);
 /// Where the local cursor waits while another machine has control.
 static FREEZE_PT: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+/// Mouse events whose deltas to ignore: the first event after a warp reports
+/// the warp distance as if the user had moved the mouse that far.
+static SKIP_DELTAS: AtomicU32 = AtomicU32::new(0);
+
+/// Move the cursor without the jump showing up as mouse movement.
+fn warp_to(x: i32, y: i32, skip_next: bool) {
+    let _ = CGDisplay::warp_mouse_cursor_position(CGPoint::new(x as f64 + 0.5, y as f64 + 0.5));
+    let (mut dx, mut dy) = (0, 0);
+    unsafe { CGGetLastMouseDelta(&mut dx, &mut dy) };
+    if skip_next {
+        SKIP_DELTAS.store(1, Ordering::SeqCst);
+    }
+}
 static CAPS_DOWN: Mutex<bool> = Mutex::new(false);
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -42,6 +55,7 @@ extern "C" {
 extern "C" {
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     fn CGSetLocalEventsSuppressionInterval(seconds: f64) -> i32;
+    fn CGGetLastMouseDelta(dx: *mut i32, dy: *mut i32);
 }
 
 /// Ask for the Accessibility permission (shows the system prompt once).
@@ -165,10 +179,7 @@ fn apply(d: Decision) -> bool {
         crate::effects::burst(pt, crate::effects::Kind::Leave);
         // Park the idle cursor away from the edge so the Dock and hover previews let go.
         let park = super::away_from_edge(pt, &Platform::monitors());
-        let _ = CGDisplay::warp_mouse_cursor_position(CGPoint::new(
-            park.0 as f64 + 0.5,
-            park.1 as f64 + 0.5,
-        ));
+        warp_to(park.0, park.1, true);
         *FREEZE_PT.lock() = Some(park);
         if !FROZEN.swap(true, Ordering::SeqCst) {
             let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(false);
@@ -184,7 +195,7 @@ fn apply(d: Decision) -> bool {
 /// Put the cursor at `(x, y)` and give it back to the user.
 pub fn warp(x: i32, y: i32) {
     *FREEZE_PT.lock() = None;
-    let _ = CGDisplay::warp_mouse_cursor_position(CGPoint::new(x as f64 + 0.5, y as f64 + 0.5));
+    warp_to(x, y, true);
     if FROZEN.swap(false, Ordering::SeqCst) {
         let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(true);
     }
@@ -217,8 +228,17 @@ fn handle(s: &Arc<Shared>, etype: CGEventType, event: &CGEvent) -> bool {
         MouseMoved | LeftMouseDragged | RightMouseDragged | OtherMouseDragged => {
             let loc = event.location();
             let pt = (loc.x.floor() as i32, loc.y.floor() as i32);
-            let dx = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X) as f64;
-            let dy = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y) as f64;
+            let mut dx = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X) as f64;
+            let mut dy = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y) as f64;
+            // Right after a warp, or an implausible jump: not real movement.
+            let skip = SKIP_DELTAS.load(Ordering::SeqCst) > 0;
+            if skip {
+                SKIP_DELTAS.fetch_sub(1, Ordering::SeqCst);
+            }
+            if skip || dx.abs() > 400.0 || dy.abs() > 400.0 {
+                dx = 0.0;
+                dy = 0.0;
+            }
             let frozen = FROZEN.load(Ordering::SeqCst);
             let mut engine = s.engine.lock();
             let mut d = engine.on_move(pt, frozen.then_some((dx, dy)));
@@ -238,10 +258,7 @@ fn handle(s: &Arc<Shared>, etype: CGEventType, event: &CGEvent) -> bool {
             if FROZEN.load(Ordering::SeqCst) {
                 if let Some(f) = *FREEZE_PT.lock() {
                     if (pt.0 - f.0).abs() > 1 || (pt.1 - f.1).abs() > 1 {
-                        let _ = CGDisplay::warp_mouse_cursor_position(CGPoint::new(
-                            f.0 as f64 + 0.5,
-                            f.1 as f64 + 0.5,
-                        ));
+                        warp_to(f.0, f.1, false);
                     }
                 }
             }
