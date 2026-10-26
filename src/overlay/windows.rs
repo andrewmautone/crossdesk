@@ -4,9 +4,9 @@
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, DeleteObject, GetDC, ReleaseDC, SelectObject,
-    AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
-    HBITMAP, HDC,
+    BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
+    SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
+    DIB_RGB_COLORS, HBITMAP, HDC, SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -171,6 +171,72 @@ impl Overlay {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
             }
             self.shown = false;
+        }
+    }
+
+    /// Copy the screen patch centered on `center`. Plain BitBlt (no CAPTUREBLT)
+    /// leaves layered windows out, so our own overlay never ends up in it.
+    pub fn capture(
+        center: (i32, i32),
+        side: usize,
+        _logical: f32,
+    ) -> Option<crate::effects::Snapshot> {
+        unsafe {
+            let screen = GetDC(None);
+            let dc = CreateCompatibleDC(screen);
+            let bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: side as i32,
+                    biHeight: -(side as i32),
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+            let result = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
+                .ok()
+                .and_then(|bmp| {
+                    SelectObject(dc, bmp);
+                    let half = side as i32 / 2;
+                    let ok = BitBlt(
+                        dc,
+                        0,
+                        0,
+                        side as i32,
+                        side as i32,
+                        screen,
+                        center.0 - half,
+                        center.1 - half,
+                        SRCCOPY,
+                    )
+                    .is_ok();
+                    let snap = ok.then(|| {
+                        let src = std::slice::from_raw_parts(bits as *const u8, side * side * 4);
+                        let mut rgba = vec![0u8; side * side * 4];
+                        for (o, i) in rgba
+                            .as_chunks_mut::<4>()
+                            .0
+                            .iter_mut()
+                            .zip(src.as_chunks::<4>().0)
+                        {
+                            *o = [i[2], i[1], i[0], 255];
+                        }
+                        crate::effects::Snapshot {
+                            w: side,
+                            h: side,
+                            rgba,
+                        }
+                    });
+                    let _ = DeleteObject(bmp);
+                    snap
+                });
+            let _ = DeleteDC(dc);
+            ReleaseDC(None, screen);
+            result
         }
     }
 

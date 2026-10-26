@@ -1,5 +1,11 @@
 //! Liquid ripple shown where the cursor leaves or enters a screen.
 //!
+//! When it can, the effect takes a snapshot of the small patch of screen
+//! around the cursor and redraws it refracted, as if the screen were water:
+//! a lens swelling while the user pushes, then ripples. Without a snapshot
+//! (setting off, or no Screen Recording permission on macOS) it draws a
+//! stylized glowing ripple instead.
+//!
 //! Frames are rendered on the CPU into a small premultiplied-RGBA buffer and
 //! shown in a transparent, click-through overlay window (see `overlay`). The
 //! overlay only exists while something is animating, so nothing sits on top of
@@ -23,6 +29,14 @@ enum Cmd {
     Burst((i32, i32), Kind),
     Push((i32, i32), f32),
     Enabled(bool),
+    Distort(bool),
+}
+
+/// The screen patch under the overlay, opaque RGBA, top-left at `center - size/2`.
+pub struct Snapshot {
+    pub w: usize,
+    pub h: usize,
+    pub rgba: Vec<u8>,
 }
 
 /// Logical size of the overlay (pixels at 100% scale / macOS points).
@@ -35,7 +49,7 @@ const CYAN: [f32; 3] = [14.0, 190.0, 220.0];
 static EFFECTS: OnceLock<Sender<Cmd>> = OnceLock::new();
 
 /// Start the animation thread. `monitors` returns this computer's screens.
-pub fn start(monitors: impl Fn() -> Vec<Monitor> + Send + 'static, enabled: bool) {
+pub fn start(monitors: impl Fn() -> Vec<Monitor> + Send + 'static, enabled: bool, distort: bool) {
     let (tx, rx) = channel::<Cmd>();
     if EFFECTS.set(tx).is_err() {
         return;
@@ -44,6 +58,8 @@ pub fn start(monitors: impl Fn() -> Vec<Monitor> + Send + 'static, enabled: bool
         .name("effects".into())
         .spawn(move || {
             let mut enabled = enabled;
+            let mut distort = distort;
+            let mut snap: Option<((i32, i32), Snapshot)> = None;
             let mut overlay: Option<Overlay> = None;
             let mut burst: Option<(Instant, (i32, i32), Kind)> = None;
             let mut push: Option<(Instant, (i32, i32), f32)> = None;
@@ -65,6 +81,7 @@ pub fn start(monitors: impl Fn() -> Vec<Monitor> + Send + 'static, enabled: bool
                 while let Some(cmd) = first.take().or_else(|| rx.try_recv().ok()) {
                     match cmd {
                         Cmd::Enabled(on) => enabled = on,
+                        Cmd::Distort(on) => distort = on,
                         _ if !enabled => {}
                         Cmd::Burst(pt, kind) => {
                             burst = Some((Instant::now(), pt, kind));
@@ -108,10 +125,19 @@ pub fn start(monitors: impl Fn() -> Vec<Monitor> + Send + 'static, enabled: bool
                     }),
                     dir,
                 };
-                let rgba = render(side, px_scale, &frame);
                 if overlay.is_none() {
                     overlay = Overlay::new();
                 }
+                // Grab the screen under the effect when it starts somewhere new.
+                if !distort {
+                    snap = None;
+                } else if !shown || snap.as_ref().map(|s| s.0) != Some(center) {
+                    snap = Overlay::capture(center, side, SIZE).map(|s| (center, s));
+                }
+                let rgba = match &snap {
+                    Some((_, s)) => render_distort(side, px_scale, &frame, s),
+                    None => render(side, px_scale, &frame),
+                };
                 if let Some(o) = overlay.as_mut() {
                     o.present(&rgba, side, center, SIZE);
                     o.pump();
@@ -135,6 +161,10 @@ pub fn burst(pt: (i32, i32), kind: Kind) {
 /// The cursor is being pushed against the edge at `pt`; `progress` is 0..1.
 pub fn push(pt: (i32, i32), progress: f64) {
     send(Cmd::Push(pt, progress as f32));
+}
+
+pub fn set_distort(on: bool) {
+    send(Cmd::Distort(on));
 }
 
 pub fn set_enabled(on: bool) {
@@ -270,6 +300,130 @@ pub fn render(side: usize, px_scale: f32, f: &Frame) -> Vec<u8> {
     out
 }
 
+fn sample(s: &Snapshot, side: usize, x: f32, y: f32, ch: usize) -> f32 {
+    let k = s.w as f32 / side as f32;
+    let fx = (x * k - 0.5).clamp(0.0, s.w as f32 - 1.001);
+    let fy = (y * k - 0.5).clamp(0.0, s.h as f32 - 1.001);
+    let (x0, y0) = (fx as usize, fy as usize);
+    let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+    let at = |x: usize, y: usize| s.rgba[(y * s.w + x) * 4 + ch] as f32;
+    let top = at(x0, y0) * (1.0 - tx) + at(x0 + 1, y0) * tx;
+    let bottom = at(x0, y0 + 1) * (1.0 - tx) + at(x0 + 1, y0 + 1) * tx;
+    top * (1.0 - ty) + bottom * ty
+}
+
+/// Refract the snapshot through a liquid surface: a lens while pushing, ripples on burst.
+pub fn render_distort(side: usize, px_scale: f32, f: &Frame, snap: &Snapshot) -> Vec<u8> {
+    let mut out = vec![0u8; side * side * 4];
+    let c = side as f32 / 2.0;
+    // Half of the patch lies past the screen edge (black); never sample from there.
+    let clamp_on_screen = |x: f32, y: f32| -> (f32, f32) {
+        match f.dir {
+            Dir::Right => (x.min(c - 1.0), y),
+            Dir::Left => (x.max(c + 1.0), y),
+            Dir::Down => (x, y.min(c - 1.0)),
+            Dir::Up => (x, y.max(c + 1.0)),
+        }
+    };
+    let light = (-0.6f32, -0.8f32);
+    for y in 0..side {
+        for x in 0..side {
+            let px = (x as f32 + 0.5 - c) / px_scale;
+            let py = (y as f32 + 0.5 - c) / px_scale;
+            let d = (px * px + py * py).sqrt();
+            let (ux, uy) = if d > 1e-3 {
+                (px / d, py / d)
+            } else {
+                (0.0, 0.0)
+            };
+            let ang = py.atan2(px);
+            let wobble =
+                (ang * 5.0 + f.time * 9.0).sin() * 0.6 + (ang * 3.0 - f.time * 6.0).sin() * 0.4;
+            let facing = ux * light.0 + uy * light.1;
+            // Radial displacement of the sample point (logical px), coverage and lighting.
+            let mut disp = 0.0f32;
+            let mut mask = 0.0f32;
+            let mut glint = 0.0f32;
+            let mut shade = 0.0f32;
+
+            if let Some(p) = f.push {
+                // A drop of water on the glass: magnifies what is under it.
+                let r = (12.0 + 54.0 * p) * (1.0 + 0.06 * wobble * p);
+                if d < r + 6.0 {
+                    let q = (d / r).min(1.0);
+                    disp -= d * 0.45 * p * (1.0 - q * q);
+                    let u = (d - r) / 2.4;
+                    let e = (-u * u).exp();
+                    disp -= u * e * 5.0 * p;
+                    mask = mask.max(1.0 - smooth(r + 0.5, r + 4.0, d));
+                    glint += e * p * (0.25 + 0.55 * facing.max(0.0));
+                    shade -= 0.10 * p * q.powi(6);
+                }
+            }
+
+            if let Some((t, kind)) = f.burst {
+                let reach = if kind == Kind::Leave { 170.0 } else { 145.0 };
+                for i in 0..3 {
+                    let ti = ((t - i as f32 * 0.13) / 0.74).clamp(0.0, 1.0);
+                    if ti <= 0.0 || ti >= 1.0 {
+                        continue;
+                    }
+                    let eased = 1.0 - (1.0 - ti).powi(3);
+                    let r = eased * reach * (1.0 + 0.035 * wobble);
+                    let w = 3.0 + 11.0 * (1.0 - ti);
+                    let amp = (if kind == Kind::Leave { 10.0 } else { 8.0 })
+                        * (1.0 - ti).powf(1.3)
+                        * (1.0 - 0.25 * i as f32);
+                    let u = (d - r) / w;
+                    let e = (-u * u).exp();
+                    let slope = -2.0 * u * e;
+                    disp += amp * slope;
+                    mask = mask.max((e * 2.2 * (1.0 - ti)).min(1.0));
+                    glint += (slope * facing).max(0.0) * amp * 0.035;
+                    shade += slope * facing * amp * 0.012;
+                }
+                // The drop: pops on leave, a small splash lens on arrive.
+                let rc = if kind == Kind::Leave {
+                    44.0 * (1.0 - t).powi(2)
+                } else {
+                    26.0 * (1.0 - t)
+                };
+                if rc > 1.0 && d < rc + 4.0 {
+                    let q = (d / rc).min(1.0);
+                    disp -= d * 0.35 * (1.0 - t) * (1.0 - q * q);
+                    mask = mask.max(1.0 - smooth(rc, rc + 3.0, d));
+                }
+            }
+
+            if mask < 0.004 {
+                continue;
+            }
+            // Sample along the radius; red bends a bit more than blue (dispersion).
+            let at = |k: f32| {
+                let sx = c + (px + ux * disp * k) * px_scale;
+                let sy = c + (py + uy * disp * k) * px_scale;
+                clamp_on_screen(sx, sy)
+            };
+            let (rx, ry) = at(1.06);
+            let (gx, gy) = at(1.0);
+            let (bx, by) = at(0.94);
+            let col = [
+                sample(snap, side, rx, ry, 0),
+                sample(snap, side, gx, gy, 1),
+                sample(snap, side, bx, by, 2),
+            ];
+            let a = mask.min(1.0);
+            let o = (y * side + x) * 4;
+            for ch in 0..3 {
+                let v = (col[ch] * (1.0 + shade) + glint * 255.0).clamp(0.0, 255.0);
+                out[o + ch] = (v * a) as u8;
+            }
+            out[o + 3] = (a * 255.0) as u8;
+        }
+    }
+    out
+}
+
 #[allow(dead_code)]
 pub fn preview_strip(path: &std::path::Path) -> std::io::Result<()> {
     // Development aid: write a few frames side by side as a PPM over a dark background.
@@ -356,6 +510,67 @@ mod tests {
         assert_eq!(edge_of(&m, (1919, 500)).0, Dir::Right);
         assert_eq!(edge_of(&m, (3, 500)).0, Dir::Left);
         assert_eq!(edge_of(&m, (900, 1079)).0, Dir::Down);
+    }
+
+    #[test]
+    fn distortion_leaves_the_screen_alone_outside_the_effect() {
+        let side = 64;
+        let snap = Snapshot {
+            w: side,
+            h: side,
+            rgba: vec![200; side * side * 4],
+        };
+        let f = Frame {
+            time: 0.0,
+            burst: None,
+            push: Some(0.5),
+            dir: Dir::Right,
+        };
+        let px = render_distort(side, 0.3, &f, &snap);
+        // Corners are outside the lens: fully transparent, the real screen shows.
+        assert_eq!(px[3], 0);
+        let mid = (side / 2 * side + side / 2) * 4;
+        assert_eq!(px[mid + 3], 255);
+        assert!(
+            px[mid] >= 190,
+            "a flat image stays the same colour under the lens"
+        );
+    }
+
+    /// Development aid: CROSSDESK_FX_SNAPSHOT = raw 340x340 RGBA file of some screen content.
+    #[test]
+    #[ignore]
+    fn write_distort_preview() {
+        let raw = std::fs::read(std::env::var("CROSSDESK_FX_SNAPSHOT").unwrap()).unwrap();
+        let side = 340usize;
+        let snap = Snapshot { w: side, h: side, rgba: raw };
+        let frames: Vec<Frame> = [0.4, 1.0]
+            .iter()
+            .map(|&p| Frame { time: p, burst: None, push: Some(p), dir: Dir::Right })
+            .chain([0.15, 0.35, 0.6].iter().map(|&t| Frame { time: t, burst: Some((t, Kind::Leave)), push: None, dir: Dir::Right }))
+            .collect();
+        let w = side * frames.len();
+        let mut img = vec![0u8; w * side * 3];
+        for (i, f) in frames.iter().enumerate() {
+            let fx = render_distort(side, 1.0, f, &snap);
+            for y in 0..side {
+                for x in 0..side {
+                    let s = (y * side + x) * 4;
+                    let a = fx[s + 3] as f32 / 255.0;
+                    let o = (y * w + i * side + x) * 3;
+                    for ch in 0..3 {
+                        let under = if x < side / 2 { snap.rgba[s + ch] as f32 } else { 0.0 };
+                        img[o + ch] = (fx[s + ch] as f32 + under * (1.0 - a)).min(255.0) as u8;
+                    }
+                }
+            }
+        }
+        let mut data = format!("P6 {w} {side} 255
+").into_bytes();
+        data.extend_from_slice(&img);
+        let out = std::env::temp_dir().join("crossdesk-distort.ppm");
+        std::fs::write(&out, data).unwrap();
+        eprintln!("preview: {}", out.display());
     }
 
     #[test]

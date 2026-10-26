@@ -530,6 +530,14 @@ impl App {
             &mut s.effects,
             "Liquid ripple where the cursor leaves and enters a screen",
         );
+        ui.add_enabled_ui(s.effects, |ui| {
+            let text = if cfg!(target_os = "macos") {
+                "Distort the real screen like water (needs Screen Recording permission)"
+            } else {
+                "Distort the real screen like water"
+            };
+            ui.checkbox(&mut s.distort, text);
+        });
         ui.checkbox(
             &mut s.swap_ctrl_cmd,
             "Swap Ctrl and Cmd/Win when the other computer runs a different system",

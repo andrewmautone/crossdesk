@@ -39,8 +39,19 @@ fn main() -> eframe::Result<()> {
     let scroll_lines = shared.config.lock().settings.scroll_lines;
     shared.injector.lock().set_scroll_lines(scroll_lines);
     let fx_shared = shared.clone();
-    let fx_on = shared.config.lock().settings.effects;
-    effects::start(move || fx_shared.local_monitors.lock().clone(), fx_on);
+    let (fx_on, fx_distort) = {
+        let c = shared.config.lock();
+        (c.settings.effects, c.settings.distort)
+    };
+    #[cfg(target_os = "macos")]
+    if fx_on && fx_distort {
+        overlay::request_capture_permission();
+    }
+    effects::start(
+        move || fx_shared.local_monitors.lock().clone(),
+        fx_on,
+        fx_distort,
+    );
     if std::env::args().any(|a| a == "--fx-demo") {
         // Plays the effects on the right edge of the main screen, for checking how they look.
         let mons = shared.local_monitors.lock().clone();

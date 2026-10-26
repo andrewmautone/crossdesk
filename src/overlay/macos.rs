@@ -12,8 +12,23 @@ use objc2::runtime::{AnyObject, Bool};
 use objc2::{class, msg_send};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicPtr, Ordering};
 use std::sync::Arc;
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
+}
+
+/// Ask once for Screen Recording, which the realistic distortion needs.
+pub fn request_capture_permission() {
+    unsafe {
+        if !CGPreflightScreenCaptureAccess() {
+            CGRequestScreenCaptureAccess();
+        }
+    }
+}
 
 extern "C" {
     static _dispatch_main_q: c_void;
@@ -44,6 +59,8 @@ fn on_main(f: impl FnOnce() + Send + 'static) {
 
 /// The overlay window; only touched on the main thread.
 static WINDOW: AtomicPtr<AnyObject> = AtomicPtr::new(std::ptr::null_mut());
+/// Its window number, so captures can skip it.
+static WINDOW_NUMBER: AtomicIsize = AtomicIsize::new(0);
 
 unsafe fn window() -> *mut AnyObject {
     let existing = WINDOW.load(Ordering::SeqCst);
@@ -69,6 +86,8 @@ unsafe fn window() -> *mut AnyObject {
     let _: () = msg_send![win, setCollectionBehavior: (1usize | 16 | 64 | 256)];
     let view: *mut AnyObject = msg_send![win, contentView];
     let _: () = msg_send![view, setWantsLayer: Bool::YES];
+    let number: isize = msg_send![win, windowNumber];
+    WINDOW_NUMBER.store(number, Ordering::SeqCst);
     WINDOW.store(win, Ordering::SeqCst);
     win
 }
@@ -132,4 +151,62 @@ impl Overlay {
     }
 
     pub fn pump(&self) {}
+
+    /// Copy the screen patch around `center` (everything below our overlay).
+    /// Without Screen Recording permission macOS returns only the wallpaper,
+    /// which would look wrong, so then there is no snapshot at all.
+    pub fn capture(
+        center: (i32, i32),
+        _side: usize,
+        logical: f32,
+    ) -> Option<crate::effects::Snapshot> {
+        use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+        use core_graphics::window::{
+            create_image, kCGNullWindowID, kCGWindowImageBestResolution,
+            kCGWindowListOptionOnScreenBelowWindow, kCGWindowListOptionOnScreenOnly,
+        };
+        if !unsafe { CGPreflightScreenCaptureAccess() } {
+            return None;
+        }
+        let l = logical as f64;
+        let rect = CGRect::new(
+            &CGPoint::new(center.0 as f64 - l / 2.0, center.1 as f64 - l / 2.0),
+            &CGSize::new(l, l),
+        );
+        let ours = WINDOW_NUMBER.load(Ordering::SeqCst);
+        let image = if ours > 0 {
+            create_image(
+                rect,
+                kCGWindowListOptionOnScreenBelowWindow,
+                ours as u32,
+                kCGWindowImageBestResolution,
+            )
+        } else {
+            create_image(
+                rect,
+                kCGWindowListOptionOnScreenOnly,
+                kCGNullWindowID,
+                kCGWindowImageBestResolution,
+            )
+        }?;
+        let (w, h, row) = (image.width(), image.height(), image.bytes_per_row());
+        if image.bits_per_pixel() != 32 || w == 0 || h == 0 {
+            return None;
+        }
+        let data = image.data();
+        let bytes = data.bytes();
+        let mut rgba = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * row + x * 4;
+                let o = (y * w + x) * 4;
+                // Screen captures come back as BGRA (32-bit little endian, alpha first).
+                rgba[o] = bytes[i + 2];
+                rgba[o + 1] = bytes[i + 1];
+                rgba[o + 2] = bytes[i];
+                rgba[o + 3] = 255;
+            }
+        }
+        Some(crate::effects::Snapshot { w, h, rgba })
+    }
 }

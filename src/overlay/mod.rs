@@ -8,7 +8,7 @@ pub use self::windows::Overlay;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use self::macos::Overlay;
+pub use self::macos::{request_capture_permission, Overlay};
 
 #[cfg(not(any(windows, target_os = "macos")))]
 mod other;

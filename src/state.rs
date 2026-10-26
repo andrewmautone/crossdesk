@@ -272,6 +272,11 @@ impl Shared {
             c.save();
         }
         crate::effects::set_enabled(settings.effects);
+        crate::effects::set_distort(settings.distort);
+        #[cfg(target_os = "macos")]
+        if settings.effects && settings.distort {
+            crate::overlay::request_capture_permission();
+        }
         self.engine.lock().set_settings(settings);
     }
 

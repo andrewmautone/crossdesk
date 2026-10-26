@@ -30,6 +30,8 @@ pub struct Settings {
     pub clipboard_sync: bool,
     /// Liquid ripple where the cursor leaves and enters a screen.
     pub effects: bool,
+    /// Refract the real screen content (needs Screen Recording on macOS).
+    pub distort: bool,
     /// When the other side runs a different OS, swap Ctrl with Cmd/Win.
     pub swap_ctrl_cmd: bool,
     /// Lines scrolled per wheel notch when this machine is controlled (macOS).
@@ -55,6 +57,7 @@ impl Default for Settings {
             edge_resistance: 120,
             clipboard_sync: true,
             effects: true,
+            distort: true,
             swap_ctrl_cmd: true,
             scroll_lines: 3.0,
             invert_scroll: false,
