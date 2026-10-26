@@ -21,6 +21,28 @@ use crate::layout::Monitor;
 use crate::protocol::Button;
 use std::collections::HashSet;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parks_off_the_taskbar_and_dock() {
+        let m = vec![Monitor {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+            primary: true,
+            name: String::new(),
+        }];
+        // Leaving through the bottom edge over the taskbar: stays at that x, moves up.
+        assert_eq!(away_from_edge((700, 1079), &m), (700, 1080 - 1 - 194));
+        // Corners move in on both axes; points already inside stay put.
+        assert_eq!(away_from_edge((0, 0), &m), (345, 194));
+        assert_eq!(away_from_edge((900, 500), &m), (900, 500));
+    }
+}
+
 /// What the OS layer must do with a captured event.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Decision {
@@ -99,6 +121,22 @@ impl Injector {
             self.backend.button(b, false);
         }
     }
+}
+
+/// A spot near `pt` but well inside its screen, off the taskbar, the Dock and
+/// hot corners. An idle cursor left on an edge keeps hover previews open.
+pub fn away_from_edge(pt: (i32, i32), mons: &[Monitor]) -> (i32, i32) {
+    let m = mons
+        .iter()
+        .find(|m| pt.0 >= m.x && pt.0 < m.x + m.w && pt.1 >= m.y && pt.1 < m.y + m.h)
+        .or_else(|| mons.first());
+    let Some(m) = m else { return pt };
+    let mx = (m.w * 18 / 100).max(160).min(m.w / 2);
+    let my = (m.h * 18 / 100).max(160).min(m.h / 2);
+    (
+        pt.0.clamp(m.x + mx, (m.x + m.w - 1 - mx).max(m.x + mx)),
+        pt.1.clamp(m.y + my, (m.y + m.h - 1 - my).max(m.y + my)),
+    )
 }
 
 pub fn monitors() -> Vec<Monitor> {

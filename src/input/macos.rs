@@ -163,7 +163,13 @@ fn run_tap(shared: Arc<Shared>) -> Result<(), String> {
 fn apply(d: Decision) -> bool {
     if let Some(pt) = d.freeze_at {
         crate::effects::burst(pt, crate::effects::Kind::Leave);
-        *FREEZE_PT.lock() = Some(pt);
+        // Park the idle cursor away from the edge so the Dock and hover previews let go.
+        let park = super::away_from_edge(pt, &Platform::monitors());
+        let _ = CGDisplay::warp_mouse_cursor_position(CGPoint::new(
+            park.0 as f64 + 0.5,
+            park.1 as f64 + 0.5,
+        ));
+        *FREEZE_PT.lock() = Some(park);
         if !FROZEN.swap(true, Ordering::SeqCst) {
             let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(false);
         }

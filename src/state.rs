@@ -450,10 +450,15 @@ impl Shared {
                     was
                 };
                 if was {
-                    self.injector.lock().release_all();
+                    let mut injector = self.injector.lock();
+                    injector.release_all();
                     if let Some(pt) = self.remote_cursor.lock().take() {
                         crate::effects::burst(pt, crate::effects::Kind::Leave);
+                        // Do not leave our idle cursor on the edge (taskbar, Dock previews).
+                        let park = input::away_from_edge(pt, &self.local_monitors.lock());
+                        injector.move_abs(park.0, park.1);
                     }
+                    drop(injector);
                     if self.config.lock().settings.clipboard_sync {
                         self.clipboard.send_to(peer);
                     }
