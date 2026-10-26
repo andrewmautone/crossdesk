@@ -25,7 +25,11 @@ fn main() -> eframe::Result<()> {
     net::start(shared.clone());
     shared.watch_monitors();
     input::start_capture(shared.clone());
-    let _ = shared.updater.set(updater::Updater::start(shared.clone()));
+    let updater = updater::Updater::start(shared.clone());
+    if std::env::args().any(|a| a == "--check-update") {
+        updater.check_now();
+    }
+    let _ = shared.updater.set(updater);
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
