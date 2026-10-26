@@ -109,7 +109,9 @@ impl World {
     pub fn build(machines: &[(String, Vec<Monitor>)], layout: &Layout) -> World {
         let mut monitors = Vec::new();
         for (id, mons) in machines {
-            let Some(p) = layout.placements.get(id) else { continue };
+            let Some(p) = layout.placements.get(id) else {
+                continue;
+            };
             for m in mons {
                 monitors.push(WorldMonitor {
                     machine: id.clone(),
@@ -141,7 +143,8 @@ impl World {
             let n = &m.native;
             let cx = pt.0.clamp(n.x, n.x + n.w - 1);
             let cy = pt.1.clamp(n.y, n.y + n.h - 1);
-            let d = (cx - pt.0) as i64 * (cx - pt.0) as i64 + (cy - pt.1) as i64 * (cy - pt.1) as i64;
+            let d =
+                (cx - pt.0) as i64 * (cx - pt.0) as i64 + (cy - pt.1) as i64 * (cy - pt.1) as i64;
             if best.is_none_or(|(_, bd)| d < bd) {
                 best = Some((i, d));
             }
@@ -170,10 +173,26 @@ impl World {
             }
             let r = m.rect;
             let (gap, along_ok, entry) = match dir {
-                Dir::Right => (r.x - c.right(), p.1 >= r.y && p.1 < r.bottom(), (r.x + 0.5, p.1)),
-                Dir::Left => (c.x - r.right(), p.1 >= r.y && p.1 < r.bottom(), (r.right() - 0.5, p.1)),
-                Dir::Down => (r.y - c.bottom(), p.0 >= r.x && p.0 < r.right(), (p.0, r.y + 0.5)),
-                Dir::Up => (c.y - r.bottom(), p.0 >= r.x && p.0 < r.right(), (p.0, r.bottom() - 0.5)),
+                Dir::Right => (
+                    r.x - c.right(),
+                    p.1 >= r.y && p.1 < r.bottom(),
+                    (r.x + 0.5, p.1),
+                ),
+                Dir::Left => (
+                    c.x - r.right(),
+                    p.1 >= r.y && p.1 < r.bottom(),
+                    (r.right() - 0.5, p.1),
+                ),
+                Dir::Down => (
+                    r.y - c.bottom(),
+                    p.0 >= r.x && p.0 < r.right(),
+                    (p.0, r.y + 0.5),
+                ),
+                Dir::Up => (
+                    c.y - r.bottom(),
+                    p.0 >= r.x && p.0 < r.right(),
+                    (p.0, r.bottom() - 0.5),
+                ),
             };
             if !along_ok || gap < -EDGE_GAP || gap > EDGE_GAP {
                 continue;
@@ -214,10 +233,25 @@ impl World {
 }
 
 /// Snap a machine's placement so its monitors touch another machine's monitors.
-pub fn snap(layout: &mut Layout, moving: &str, machines: &[(String, Vec<Monitor>)], threshold: f64) {
+pub fn snap(
+    layout: &mut Layout,
+    moving: &str,
+    machines: &[(String, Vec<Monitor>)],
+    threshold: f64,
+) {
     let world = World::build(machines, layout);
-    let mine: Vec<Rect> = world.monitors.iter().filter(|m| m.machine == moving).map(|m| m.rect).collect();
-    let others: Vec<Rect> = world.monitors.iter().filter(|m| m.machine != moving).map(|m| m.rect).collect();
+    let mine: Vec<Rect> = world
+        .monitors
+        .iter()
+        .filter(|m| m.machine == moving)
+        .map(|m| m.rect)
+        .collect();
+    let others: Vec<Rect> = world
+        .monitors
+        .iter()
+        .filter(|m| m.machine != moving)
+        .map(|m| m.rect)
+        .collect();
     let mut best_dx: Option<f64> = None;
     let mut best_dy: Option<f64> = None;
     let consider = |best: &mut Option<f64>, d: f64| {
@@ -267,7 +301,14 @@ mod tests {
     use super::*;
 
     fn mon(x: i32, y: i32, w: i32, h: i32) -> Monitor {
-        Monitor { x, y, w, h, primary: x == 0 && y == 0, name: String::new() }
+        Monitor {
+            x,
+            y,
+            w,
+            h,
+            primary: x == 0 && y == 0,
+            name: String::new(),
+        }
     }
 
     fn two_machines() -> (Vec<(String, Vec<Monitor>)>, Layout) {
@@ -276,8 +317,22 @@ mod tests {
             ("mac".to_string(), vec![mon(0, 0, 1440, 900)]),
         ];
         let mut layout = Layout::default();
-        layout.placements.insert("pc".into(), Placement { x: 0.0, y: 0.0, scale: 1.0 });
-        layout.placements.insert("mac".into(), Placement { x: 1920.0, y: 0.0, scale: 1.2 });
+        layout.placements.insert(
+            "pc".into(),
+            Placement {
+                x: 0.0,
+                y: 0.0,
+                scale: 1.0,
+            },
+        );
+        layout.placements.insert(
+            "mac".into(),
+            Placement {
+                x: 1920.0,
+                y: 0.0,
+                scale: 1.2,
+            },
+        );
         (machines, layout)
     }
 

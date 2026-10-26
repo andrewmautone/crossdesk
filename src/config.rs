@@ -25,6 +25,8 @@ pub struct Settings {
     pub edge_switch: bool,
     /// Pixels at each end of an edge where switching is ignored (corners stay usable).
     pub corner_px: i32,
+    /// How far (pixels) to keep pushing past an edge before the cursor crosses; 0 = at once.
+    pub edge_resistance: i32,
     pub clipboard_sync: bool,
     /// When the other side runs a different OS, swap Ctrl with Cmd/Win.
     pub swap_ctrl_cmd: bool,
@@ -48,6 +50,7 @@ impl Default for Settings {
         Settings {
             edge_switch: true,
             corner_px: 0,
+            edge_resistance: 120,
             clipboard_sync: true,
             swap_ctrl_cmd: true,
             scroll_lines: 3.0,
@@ -98,7 +101,10 @@ impl Config {
                 Err(e) => eprintln!("config {} unreadable ({e}); starting fresh", p.display()),
             }
         }
-        let name = gethostname::gethostname().to_string_lossy().trim_end_matches(".local").to_string();
+        let name = gethostname::gethostname()
+            .to_string_lossy()
+            .trim_end_matches(".local")
+            .to_string();
         let c = Config {
             id: crate::crypto::random_id(),
             name,

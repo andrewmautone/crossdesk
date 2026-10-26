@@ -143,11 +143,17 @@ const TABLE: &[(u16, u16, u16)] = &[
 ];
 
 pub fn hid_from_win(scancode: u16) -> Option<u16> {
-    TABLE.iter().find(|e| e.1 == scancode && e.1 != NONE).map(|e| e.0)
+    TABLE
+        .iter()
+        .find(|e| e.1 == scancode && e.1 != NONE)
+        .map(|e| e.0)
 }
 
 pub fn win_from_hid(hid: u16) -> Option<u16> {
-    TABLE.iter().find(|e| e.0 == hid && e.1 != NONE).map(|e| e.1)
+    TABLE
+        .iter()
+        .find(|e| e.0 == hid && e.1 != NONE)
+        .map(|e| e.1)
 }
 
 /// macOS keycodes are reused for a few aliases (F13/Print Screen...), so the
@@ -159,11 +165,19 @@ pub fn hid_from_mac(keycode: u16) -> Option<u16> {
         0x71 => Some(0x6A), // F15
         _ => None,
     };
-    preferred.or_else(|| TABLE.iter().find(|e| e.2 == keycode && e.2 != NONE).map(|e| e.0))
+    preferred.or_else(|| {
+        TABLE
+            .iter()
+            .find(|e| e.2 == keycode && e.2 != NONE)
+            .map(|e| e.0)
+    })
 }
 
 pub fn mac_from_hid(hid: u16) -> Option<u16> {
-    TABLE.iter().find(|e| e.0 == hid && e.2 != NONE).map(|e| e.2)
+    TABLE
+        .iter()
+        .find(|e| e.0 == hid && e.2 != NONE)
+        .map(|e| e.2)
 }
 
 pub fn is_modifier(hid: u16) -> bool {
@@ -190,7 +204,11 @@ mod tests {
         for (i, a) in TABLE.iter().enumerate() {
             for b in &TABLE[i + 1..] {
                 assert_ne!(a.0, b.0, "duplicate hid {:#x}", a.0);
-                assert!(a.1 != b.1 || a.1 == NONE, "duplicate win scancode {:#x}", a.1);
+                assert!(
+                    a.1 != b.1 || a.1 == NONE,
+                    "duplicate win scancode {:#x}",
+                    a.1
+                );
             }
         }
     }

@@ -13,8 +13,8 @@ use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
 use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::display::{CGDisplay, CGPoint};
 use core_graphics::event::{
-    CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
-    CGMouseButton, EventField, ScrollEventUnit,
+    CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+    CGEventType, CGMouseButton, EventField, ScrollEventUnit,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use parking_lot::Mutex;
@@ -45,7 +45,11 @@ extern "C" {
 fn accessibility_trusted(prompt: bool) -> bool {
     unsafe {
         let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
-        let value = if prompt { CFBoolean::true_value() } else { CFBoolean::false_value() };
+        let value = if prompt {
+            CFBoolean::true_value()
+        } else {
+            CFBoolean::false_value()
+        };
         let opts = CFDictionary::from_CFType_pairs(&[(key, value)]);
         AXIsProcessTrustedWithOptions(opts.as_concrete_TypeRef())
     }
@@ -132,7 +136,10 @@ fn run_tap(shared: Arc<Shared>) -> Result<(), String> {
         },
     )
     .map_err(|_| "cannot create the event tap; check the Accessibility permission".to_string())?;
-    TAP_PORT.store(tap.mach_port.as_concrete_TypeRef() as *mut _, Ordering::SeqCst);
+    TAP_PORT.store(
+        tap.mach_port.as_concrete_TypeRef() as *mut _,
+        Ordering::SeqCst,
+    );
     let source = tap
         .mach_port
         .create_runloop_source(0)
@@ -168,14 +175,14 @@ pub fn warp(x: i32, y: i32) {
 /// Device-dependent modifier bit for each modifier keycode (left/right aware).
 fn modifier_bit(keycode: u16) -> Option<u64> {
     Some(match keycode {
-        0x3B => 0x0001,   // left control
-        0x38 => 0x0002,   // left shift
-        0x3C => 0x0004,   // right shift
-        0x37 => 0x0008,   // left command
-        0x36 => 0x0010,   // right command
-        0x3A => 0x0020,   // left option
-        0x3D => 0x0040,   // right option
-        0x3E => 0x2000,   // right control
+        0x3B => 0x0001, // left control
+        0x38 => 0x0002, // left shift
+        0x3C => 0x0004, // right shift
+        0x37 => 0x0008, // left command
+        0x36 => 0x0010, // right command
+        0x3A => 0x0020, // left option
+        0x3D => 0x0040, // right option
+        0x3E => 0x2000, // right control
         _ => return None,
     })
 }
@@ -194,8 +201,14 @@ fn handle(s: &Arc<Shared>, etype: CGEventType, event: &CGEvent) -> bool {
             let pt = (loc.x.floor() as i32, loc.y.floor() as i32);
             let dx = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X) as f64;
             let dy = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y) as f64;
-            let delta = FROZEN.load(Ordering::SeqCst).then_some((dx, dy));
-            let d = s.engine.lock().on_move(pt, delta);
+            let frozen = FROZEN.load(Ordering::SeqCst);
+            let mut engine = s.engine.lock();
+            let mut d = engine.on_move(pt, frozen.then_some((dx, dy)));
+            if !frozen && d == Decision::default() {
+                // The deltas keep coming while the cursor is pinned on an edge.
+                d = engine.on_push_delta(dx, dy);
+            }
+            drop(engine);
             apply(d)
         }
         LeftMouseDown => button(Button::Left, true),
@@ -205,16 +218,23 @@ fn handle(s: &Arc<Shared>, etype: CGEventType, event: &CGEvent) -> bool {
         OtherMouseDown => button(other(), true),
         OtherMouseUp => button(other(), false),
         ScrollWheel => {
-            let continuous = event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS) != 0;
+            let continuous =
+                event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS) != 0;
             let (dx, dy) = if continuous {
                 (
-                    event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2) * 3,
-                    event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1) * 3,
+                    event
+                        .get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2)
+                        * 3,
+                    event
+                        .get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1)
+                        * 3,
                 )
             } else {
                 (
-                    event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2) * 120,
-                    event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1) * 120,
+                    event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2)
+                        * 120,
+                    event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1)
+                        * 120,
                 )
             };
             s.engine.lock().on_wheel(dx as i32, dy as i32)
@@ -222,14 +242,18 @@ fn handle(s: &Arc<Shared>, etype: CGEventType, event: &CGEvent) -> bool {
         KeyDown | KeyUp => {
             let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
             let remote = s.engine.lock().active_target().is_some();
-            let Some(hid) = keymap::hid_from_mac(keycode) else { return remote };
+            let Some(hid) = keymap::hid_from_mac(keycode) else {
+                return remote;
+            };
             let d = s.engine.lock().on_key(hid, matches!(etype, KeyDown));
             apply(d)
         }
         FlagsChanged => {
             let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
             let remote = s.engine.lock().active_target().is_some();
-            let Some(hid) = keymap::hid_from_mac(keycode) else { return remote };
+            let Some(hid) = keymap::hid_from_mac(keycode) else {
+                return remote;
+            };
             if keycode == 0x39 {
                 // Caps Lock reports only state changes; send a full press.
                 let mut caps = CAPS_DOWN.lock();
@@ -240,7 +264,9 @@ fn handle(s: &Arc<Shared>, etype: CGEventType, event: &CGEvent) -> bool {
                 drop(e);
                 return apply(a) | apply(b);
             }
-            let Some(bit) = modifier_bit(keycode) else { return remote };
+            let Some(bit) = modifier_bit(keycode) else {
+                return remote;
+            };
             let down = event.get_flags().bits() & bit != 0;
             let d = s.engine.lock().on_key(hid, down);
             apply(d)
@@ -258,7 +284,12 @@ pub struct Platform {
 
 impl Default for Platform {
     fn default() -> Self {
-        Platform { keys: HashSet::new(), buttons: HashSet::new(), last_click: None, pos: CGPoint::new(0.0, 0.0) }
+        Platform {
+            keys: HashSet::new(),
+            buttons: HashSet::new(),
+            last_click: None,
+            pos: CGPoint::new(0.0, 0.0),
+        }
     }
 }
 
@@ -345,8 +376,16 @@ impl Backend for Platform {
             (Button::Left, false) => (CGEventType::LeftMouseUp, CGMouseButton::Left, 0),
             (Button::Right, true) => (CGEventType::RightMouseDown, CGMouseButton::Right, 1),
             (Button::Right, false) => (CGEventType::RightMouseUp, CGMouseButton::Right, 1),
-            (b, true) => (CGEventType::OtherMouseDown, CGMouseButton::Center, other_number(b)),
-            (b, false) => (CGEventType::OtherMouseUp, CGMouseButton::Center, other_number(b)),
+            (b, true) => (
+                CGEventType::OtherMouseDown,
+                CGMouseButton::Center,
+                other_number(b),
+            ),
+            (b, false) => (
+                CGEventType::OtherMouseUp,
+                CGMouseButton::Center,
+                other_number(b),
+            ),
         };
         // Count consecutive clicks so double and triple clicks work.
         let clicks = if down {
@@ -384,7 +423,9 @@ impl Backend for Platform {
     }
 
     fn key(&mut self, hid: u16, down: bool) {
-        let Some(code) = keymap::mac_from_hid(hid) else { return };
+        let Some(code) = keymap::mac_from_hid(hid) else {
+            return;
+        };
         let repeat = down && self.keys.contains(&hid);
         if down {
             self.keys.insert(hid);

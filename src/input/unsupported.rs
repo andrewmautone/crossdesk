@@ -21,7 +21,14 @@ pub struct Platform;
 
 impl Backend for Platform {
     fn monitors() -> Vec<Monitor> {
-        vec![Monitor { x: 0, y: 0, w: 1920, h: 1080, primary: true, name: "Display".into() }]
+        vec![Monitor {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+            primary: true,
+            name: "Display".into(),
+        }]
     }
     fn move_abs(&mut self, _x: i32, _y: i32) {}
     fn button(&mut self, _button: Button, _down: bool) {}

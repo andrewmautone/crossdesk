@@ -45,7 +45,8 @@ fn main() -> eframe::Result<()> {
     }
     let _ = shared.updater.set(updater);
 
-    let start_hidden = cfg!(any(windows, target_os = "macos")) && shared.config.lock().settings.start_hidden;
+    let start_hidden =
+        cfg!(any(windows, target_os = "macos")) && shared.config.lock().settings.start_hidden;
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("crossdesk")

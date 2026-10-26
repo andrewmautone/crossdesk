@@ -24,7 +24,10 @@ struct View {
 
 impl View {
     fn to_screen(self, x: f64, y: f64) -> Pos2 {
-        Pos2::new(x as f32 * self.scale + self.offset.x, y as f32 * self.scale + self.offset.y)
+        Pos2::new(
+            x as f32 * self.scale + self.offset.x,
+            y as f32 * self.scale + self.offset.y,
+        )
     }
 }
 
@@ -74,7 +77,9 @@ fn machine_color(id: &str, local: bool) -> Color32 {
     if local {
         return Color32::from_rgb(52, 120, 220);
     }
-    let h = id.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+    let h = id
+        .bytes()
+        .fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
     let palette = [
         Color32::from_rgb(220, 120, 50),
         Color32::from_rgb(60, 160, 100),
@@ -98,7 +103,11 @@ fn parse_addr(text: &str) -> Option<SocketAddr> {
     if t.is_empty() {
         return None;
     }
-    let with_port = if t.contains(':') { t.to_string() } else { format!("{t}:{}", crate::protocol::TCP_PORT) };
+    let with_port = if t.contains(':') {
+        t.to_string()
+    } else {
+        format!("{t}:{}", crate::protocol::TCP_PORT)
+    };
     with_port.to_socket_addrs().ok()?.find(|a| a.is_ipv4())
 }
 
@@ -154,25 +163,47 @@ impl App {
                 ui.separator();
                 ui.label("This computer:");
                 let r = ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(160.0));
-                if r.lost_focus() && !self.name.trim().is_empty() && self.name != self.shared.config.lock().name {
+                if r.lost_focus()
+                    && !self.name.trim().is_empty()
+                    && self.name != self.shared.config.lock().name
+                {
                     self.shared.set_name(self.name.trim().to_string());
                 }
                 ui.separator();
-                let target = self.shared.engine.lock().active_target().map(str::to_string);
+                let target = self
+                    .shared
+                    .engine
+                    .lock()
+                    .active_target()
+                    .map(str::to_string);
                 let locked = self.shared.engine.lock().is_locked();
                 let controlled = self.shared.controlled_by.lock().clone();
                 let peer_name = |id: &str| {
-                    self.shared.peers.lock().get(id).map(|p| p.name.clone()).unwrap_or_else(|| id[..6.min(id.len())].into())
+                    self.shared
+                        .peers
+                        .lock()
+                        .get(id)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| id[..6.min(id.len())].into())
                 };
                 if let Some(t) = target {
-                    ui.colored_label(Color32::from_rgb(220, 140, 40), format!("Controlling {}", peer_name(&t)));
+                    ui.colored_label(
+                        Color32::from_rgb(220, 140, 40),
+                        format!("Controlling {}", peer_name(&t)),
+                    );
                 } else if let Some(c) = controlled {
-                    ui.colored_label(Color32::from_rgb(60, 170, 100), format!("Controlled by {}", peer_name(&c)));
+                    ui.colored_label(
+                        Color32::from_rgb(60, 170, 100),
+                        format!("Controlled by {}", peer_name(&c)),
+                    );
                 } else {
                     ui.label("Using this computer");
                 }
                 if locked {
-                    ui.colored_label(Color32::from_rgb(200, 60, 60), "Cursor locked (Ctrl+Alt+Shift+L)");
+                    ui.colored_label(
+                        Color32::from_rgb(200, 60, 60),
+                        "Cursor locked (Ctrl+Alt+Shift+L)",
+                    );
                 }
             });
             if let Some(err) = self.shared.capture_error.lock().clone() {
@@ -183,101 +214,126 @@ impl App {
     }
 
     fn machines_panel(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("machines").resizable(false).exact_width(290.0).show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.strong("Computers on your network");
-            ui.add_space(4.0);
+        egui::SidePanel::left("machines")
+            .resizable(false)
+            .exact_width(290.0)
+            .show(ctx, |ui| {
+                ui.add_space(6.0);
+                ui.strong("Computers on your network");
+                ui.add_space(4.0);
 
-            struct Row {
-                id: String,
-                name: String,
-                os: String,
-                addr: Option<SocketAddr>,
-                trusted: bool,
-                connected: bool,
-            }
-            let my_id = self.shared.config.lock().id.clone();
-            let mut rows: Vec<Row> = Vec::new();
-            for (id, t) in self.shared.config.lock().trusted.iter() {
-                rows.push(Row {
-                    id: id.clone(),
-                    name: t.name.clone(),
-                    os: t.os.clone(),
-                    addr: t.last_addr.as_deref().and_then(|a| a.parse().ok()),
-                    trusted: true,
-                    connected: self.shared.registry.is_connected(id),
-                });
-            }
-            for (id, d) in self.shared.discovered.lock().iter() {
-                if *id == my_id || d.last_seen.elapsed() > Duration::from_secs(10) {
-                    continue;
+                struct Row {
+                    id: String,
+                    name: String,
+                    os: String,
+                    addr: Option<SocketAddr>,
+                    trusted: bool,
+                    connected: bool,
                 }
-                if let Some(r) = rows.iter_mut().find(|r| r.id == *id) {
-                    r.addr = Some(d.addr);
-                    continue;
-                }
-                rows.push(Row {
-                    id: id.clone(),
-                    name: d.name.clone(),
-                    os: d.os.clone(),
-                    addr: Some(d.addr),
-                    trusted: false,
-                    connected: false,
-                });
-            }
-            rows.sort_by_key(|r| r.name.to_lowercase());
-
-            if rows.is_empty() {
-                ui.label(RichText::new("Searching… Open crossdesk on the other computer (same Wi-Fi/network).").weak());
-            }
-            for r in rows {
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.strong(&r.name);
-                        ui.label(RichText::new(os_label(&r.os)).weak());
+                let my_id = self.shared.config.lock().id.clone();
+                let mut rows: Vec<Row> = Vec::new();
+                for (id, t) in self.shared.config.lock().trusted.iter() {
+                    rows.push(Row {
+                        id: id.clone(),
+                        name: t.name.clone(),
+                        os: t.os.clone(),
+                        addr: t.last_addr.as_deref().and_then(|a| a.parse().ok()),
+                        trusted: true,
+                        connected: self.shared.registry.is_connected(id),
                     });
-                    ui.horizontal(|ui| {
-                        let (text, color) = match (r.trusted, r.connected) {
-                            (true, true) => ("Connected", Color32::from_rgb(60, 170, 100)),
-                            (true, false) => ("Paired, offline", Color32::GRAY),
-                            _ => ("Not paired", Color32::from_rgb(200, 150, 40)),
-                        };
-                        ui.colored_label(color, text);
-                        if let Some(a) = r.addr {
-                            ui.label(RichText::new(a.ip().to_string()).weak().small());
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if r.trusted {
-                                if ui.small_button("Forget").clicked() {
-                                    self.shared.forget(&r.id);
-                                }
-                            } else if let Some(a) = r.addr {
-                                if ui.button("Pair").clicked() {
-                                    self.code_input.clear();
-                                    net::start_pairing(self.shared.clone(), a);
-                                }
+                }
+                for (id, d) in self.shared.discovered.lock().iter() {
+                    if *id == my_id || d.last_seen.elapsed() > Duration::from_secs(10) {
+                        continue;
+                    }
+                    if let Some(r) = rows.iter_mut().find(|r| r.id == *id) {
+                        r.addr = Some(d.addr);
+                        continue;
+                    }
+                    rows.push(Row {
+                        id: id.clone(),
+                        name: d.name.clone(),
+                        os: d.os.clone(),
+                        addr: Some(d.addr),
+                        trusted: false,
+                        connected: false,
+                    });
+                }
+                rows.sort_by_key(|r| r.name.to_lowercase());
+
+                if rows.is_empty() {
+                    ui.label(
+                        RichText::new(
+                            "Searching… Open crossdesk on the other computer (same Wi-Fi/network).",
+                        )
+                        .weak(),
+                    );
+                }
+                for r in rows {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.strong(&r.name);
+                            ui.label(RichText::new(os_label(&r.os)).weak());
+                        });
+                        ui.horizontal(|ui| {
+                            let (text, color) = match (r.trusted, r.connected) {
+                                (true, true) => ("Connected", Color32::from_rgb(60, 170, 100)),
+                                (true, false) => ("Paired, offline", Color32::GRAY),
+                                _ => ("Not paired", Color32::from_rgb(200, 150, 40)),
+                            };
+                            ui.colored_label(color, text);
+                            if let Some(a) = r.addr {
+                                ui.label(RichText::new(a.ip().to_string()).weak().small());
                             }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if r.trusted {
+                                        if ui.small_button("Forget").clicked() {
+                                            self.shared.forget(&r.id);
+                                        }
+                                    } else if let Some(a) = r.addr {
+                                        if ui.button("Pair").clicked() {
+                                            self.code_input.clear();
+                                            net::start_pairing(self.shared.clone(), a);
+                                        }
+                                    }
+                                },
+                            );
                         });
                     });
-                });
-            }
-
-            ui.add_space(10.0);
-            ui.separator();
-            ui.label("Not listed? Pair by IP address:");
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.manual_addr).hint_text("192.168.0.20").desired_width(170.0));
-                let addr = parse_addr(&self.manual_addr);
-                if ui.add_enabled(addr.is_some(), egui::Button::new("Pair")).clicked() {
-                    self.code_input.clear();
-                    net::start_pairing(self.shared.clone(), addr.unwrap());
                 }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.label("Not listed? Pair by IP address:");
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.manual_addr)
+                            .hint_text("192.168.0.20")
+                            .desired_width(170.0),
+                    );
+                    let addr = parse_addr(&self.manual_addr);
+                    if ui
+                        .add_enabled(addr.is_some(), egui::Button::new("Pair"))
+                        .clicked()
+                    {
+                        self.code_input.clear();
+                        net::start_pairing(self.shared.clone(), addr.unwrap());
+                    }
+                });
+                ui.add_space(6.0);
+                let port = self.shared.config.lock().port;
+                ui.label(
+                    RichText::new(format!(
+                        "Uses TCP {port} and UDP {} on the local network.",
+                        crate::protocol::DISCOVERY_PORT
+                    ))
+                    .weak()
+                    .small(),
+                );
             });
-            ui.add_space(6.0);
-            let port = self.shared.config.lock().port;
-            ui.label(RichText::new(format!("Uses TCP {port} and UDP {} on the local network.", crate::protocol::DISCOVERY_PORT)).weak().small());
-        });
     }
 
     fn layout_tab(&mut self, ui: &mut egui::Ui) {
@@ -293,19 +349,28 @@ impl App {
         let world = World::build(&machines, &layout);
         let names: std::collections::HashMap<String, String> = {
             let peers = self.shared.peers.lock();
-            let mut m: std::collections::HashMap<String, String> =
-                peers.iter().map(|(id, p)| (id.clone(), p.name.clone())).collect();
+            let mut m: std::collections::HashMap<String, String> = peers
+                .iter()
+                .map(|(id, p)| (id.clone(), p.name.clone()))
+                .collect();
             m.insert(my_id.clone(), self.shared.config.lock().name.clone());
             m
         };
 
         let canvas_h = (ui.available_height() - 90.0).max(220.0);
-        let (response, painter) = ui.allocate_painter(Vec2::new(ui.available_width(), canvas_h), Sense::hover());
+        let (response, painter) =
+            ui.allocate_painter(Vec2::new(ui.available_width(), canvas_h), Sense::hover());
         let area = response.rect;
         painter.rect_filled(area, 8.0, ui.visuals().extreme_bg_color);
 
         if world.monitors.is_empty() {
-            painter.text(area.center(), Align2::CENTER_CENTER, "No screens yet", FontId::proportional(16.0), Color32::GRAY);
+            painter.text(
+                area.center(),
+                Align2::CENTER_CENTER,
+                "No screens yet",
+                FontId::proportional(16.0),
+                Color32::GRAY,
+            );
             return;
         }
 
@@ -325,7 +390,10 @@ impl App {
                 let scale = sw.min(sh);
                 let content = Vec2::new((x1 - x0) as f32 * scale, (y1 - y0) as f32 * scale);
                 let origin = area.center() - content / 2.0;
-                View { scale, offset: Vec2::new(origin.x - x0 as f32 * scale, origin.y - y0 as f32 * scale) }
+                View {
+                    scale,
+                    offset: Vec2::new(origin.x - x0 as f32 * scale, origin.y - y0 as f32 * scale),
+                }
             }
         };
 
@@ -335,18 +403,34 @@ impl App {
         let mut labeled: std::collections::HashSet<String> = Default::default();
 
         for (i, m) in world.monitors.iter().enumerate() {
-            let rect = Rect::from_min_max(view.to_screen(m.rect.x, m.rect.y), view.to_screen(m.rect.right(), m.rect.bottom()))
-                .shrink(1.5);
+            let rect = Rect::from_min_max(
+                view.to_screen(m.rect.x, m.rect.y),
+                view.to_screen(m.rect.right(), m.rect.bottom()),
+            )
+            .shrink(1.5);
             let local = m.machine == my_id;
             let color = machine_color(&m.machine, local);
             let resp = ui.interact(rect, ui.id().with(("monitor", i)), Sense::drag());
-            let hovered = resp.hovered() || self.drag.as_ref().is_some_and(|d| d.machine == m.machine);
-            painter.rect_filled(rect, 4.0, color.gamma_multiply(if hovered { 0.55 } else { 0.35 }));
-            painter.rect_stroke(rect, 4.0, Stroke::new(if m.native.primary { 2.5_f32 } else { 1.5 }, color));
+            let hovered =
+                resp.hovered() || self.drag.as_ref().is_some_and(|d| d.machine == m.machine);
+            painter.rect_filled(
+                rect,
+                4.0,
+                color.gamma_multiply(if hovered { 0.55 } else { 0.35 }),
+            );
+            painter.rect_stroke(
+                rect,
+                4.0,
+                Stroke::new(if m.native.primary { 2.5_f32 } else { 1.5 }, color),
+            );
             let mut lines = Vec::new();
             if labeled.insert(m.machine.clone()) {
                 let name = names.get(&m.machine).cloned().unwrap_or_default();
-                lines.push(if local { format!("{name} (this one)") } else { name });
+                lines.push(if local {
+                    format!("{name} (this one)")
+                } else {
+                    name
+                });
             }
             lines.push(format!("{} × {}", m.native.w, m.native.h));
             painter.text(
@@ -379,7 +463,11 @@ impl App {
         }
 
         if let Some(machine) = drag_started {
-            self.drag = Some(Drag { machine, layout: layout.clone(), view });
+            self.drag = Some(Drag {
+                machine,
+                layout: layout.clone(),
+                view,
+            });
         }
         if let (Some(d), Some((machine, delta))) = (self.drag.as_mut(), drag_delta) {
             if d.machine == machine {
@@ -423,19 +511,44 @@ impl App {
     fn settings_tab(&mut self, ui: &mut egui::Ui) {
         let mut s: Settings = self.shared.config.lock().settings.clone();
         let before = s.clone();
-        ui.checkbox(&mut s.edge_switch, "Switch computers by pushing the mouse past a screen edge");
+        ui.checkbox(
+            &mut s.edge_switch,
+            "Switch computers by pushing the mouse past a screen edge",
+        );
+        ui.horizontal(|ui| {
+            ui.label("Push needed to cross:");
+            ui.add(egui::Slider::new(&mut s.edge_resistance, 0..=600).suffix(" px")).on_hover_text(
+                "The cursor stops at the edge; keep pushing this far to go to the other computer. 0 crosses right away.",
+            );
+        });
         ui.horizontal(|ui| {
             ui.label("Ignore corners (pixels):");
             ui.add(egui::DragValue::new(&mut s.corner_px).range(0..=400));
         });
         ui.checkbox(&mut s.clipboard_sync, "Share copied text between computers");
-        ui.checkbox(&mut s.swap_ctrl_cmd, "Swap Ctrl and Cmd/Win when the other computer runs a different system")
-            .on_hover_text("With this on, Ctrl+C on the PC keyboard does Cmd+C on the Mac.");
-        ui.checkbox(&mut s.invert_scroll, "Invert scroll direction when controlled from another computer");
+        ui.checkbox(
+            &mut s.swap_ctrl_cmd,
+            "Swap Ctrl and Cmd/Win when the other computer runs a different system",
+        )
+        .on_hover_text("With this on, Ctrl+C on the PC keyboard does Cmd+C on the Mac.");
+        ui.checkbox(
+            &mut s.invert_scroll,
+            "Invert scroll direction when controlled from another computer",
+        );
         if cfg!(any(windows, target_os = "macos")) {
-            let place = if cfg!(target_os = "macos") { "menu bar" } else { "tray" };
-            ui.checkbox(&mut s.close_to_tray, format!("Closing the window keeps crossdesk running in the {place}"));
-            ui.checkbox(&mut s.start_hidden, format!("Start in the {place} without opening the window"));
+            let place = if cfg!(target_os = "macos") {
+                "menu bar"
+            } else {
+                "tray"
+            };
+            ui.checkbox(
+                &mut s.close_to_tray,
+                format!("Closing the window keeps crossdesk running in the {place}"),
+            );
+            ui.checkbox(
+                &mut s.start_hidden,
+                format!("Start in the {place} without opening the window"),
+            );
         }
         if cfg!(target_os = "macos") {
             ui.horizontal(|ui| {
@@ -457,17 +570,29 @@ impl App {
             .on_hover_text("Checks GitHub every 30 minutes, and right away when another computer already runs a newer version.");
         ui.horizontal(|ui| {
             ui.label("GitHub repository:");
-            ui.add(egui::TextEdit::singleline(&mut s.update_repo).hint_text("owner/repo").desired_width(220.0));
+            ui.add(
+                egui::TextEdit::singleline(&mut s.update_repo)
+                    .hint_text("owner/repo")
+                    .desired_width(220.0),
+            );
         });
         ui.horizontal(|ui| {
             ui.label("Token (private repository only):");
-            ui.add(egui::TextEdit::singleline(&mut s.github_token).password(true).desired_width(220.0));
+            ui.add(
+                egui::TextEdit::singleline(&mut s.github_token)
+                    .password(true)
+                    .desired_width(220.0),
+            );
         });
         if s != before {
             self.shared.set_settings(s);
         }
         ui.horizontal(|ui| {
-            ui.label(if build == 0 { "This is a local build (version 0).".to_string() } else { format!("Build {build}.") });
+            ui.label(if build == 0 {
+                "This is a local build (version 0).".to_string()
+            } else {
+                format!("Build {build}.")
+            });
             if ui.button("Check now").clicked() {
                 if let Some(u) = self.shared.updater.get() {
                     u.check_now();
@@ -480,19 +605,33 @@ impl App {
         });
         ui.add_space(12.0);
         ui.separator();
-        ui.label(RichText::new(format!("Settings file: {}", crate::config::path().display())).weak().small());
+        ui.label(
+            RichText::new(format!(
+                "Settings file: {}",
+                crate::config::path().display()
+            ))
+            .weak()
+            .small(),
+        );
     }
 
     fn log_tab(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-            for line in self.shared.log.lock().iter() {
-                ui.label(RichText::new(line).monospace());
-            }
-        });
+        egui::ScrollArea::vertical()
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for line in self.shared.log.lock().iter() {
+                    ui.label(RichText::new(line).monospace());
+                }
+            });
     }
 
     fn pairing_windows(&mut self, ctx: &egui::Context) {
-        let incoming = self.shared.incoming_pair.lock().as_ref().map(|p| (p.peer_name.clone(), p.code.clone(), p.since));
+        let incoming = self
+            .shared
+            .incoming_pair
+            .lock()
+            .as_ref()
+            .map(|p| (p.peer_name.clone(), p.code.clone(), p.since));
         if let Some((peer, code, since)) = incoming {
             if since.elapsed() > Duration::from_secs(120) {
                 *self.shared.incoming_pair.lock() = None;
@@ -502,11 +641,17 @@ impl App {
                     .resizable(false)
                     .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
-                        ui.label(format!("{peer} wants to share the mouse and keyboard with this computer."));
+                        ui.label(format!(
+                            "{peer} wants to share the mouse and keyboard with this computer."
+                        ));
                         ui.label("Type this code on it:");
                         let spaced = format!("{} {}", &code[..3], &code[3..]);
                         ui.label(RichText::new(spaced).size(36.0).monospace().strong());
-                        ui.label(RichText::new("If you did not start this, just ignore it.").weak().small());
+                        ui.label(
+                            RichText::new("If you did not start this, just ignore it.")
+                                .weak()
+                                .small(),
+                        );
                     });
             }
         }
@@ -539,10 +684,18 @@ impl App {
                                 .char_limit(7),
                         );
                         r.request_focus();
-                        let digits: String = self.code_input.chars().filter(|c| c.is_ascii_digit()).collect();
+                        let digits: String = self
+                            .code_input
+                            .chars()
+                            .filter(|c| c.is_ascii_digit())
+                            .collect();
                         let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         ui.horizontal(|ui| {
-                            if ui.add_enabled(digits.len() == 6, egui::Button::new("Pair")).clicked() || (enter && digits.len() == 6) {
+                            if ui
+                                .add_enabled(digits.len() == 6, egui::Button::new("Pair"))
+                                .clicked()
+                                || (enter && digits.len() == 6)
+                            {
                                 submit = true;
                             }
                             if ui.button("Cancel").clicked() {
@@ -558,7 +711,11 @@ impl App {
                 });
         }
         if submit {
-            let digits: String = self.code_input.chars().filter(|c| c.is_ascii_digit()).collect();
+            let digits: String = self
+                .code_input
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .collect();
             if let Some(p) = self.shared.outgoing_pair.lock().as_mut() {
                 if let Some(tx) = p.code_tx.take() {
                     let _ = tx.send(digits);

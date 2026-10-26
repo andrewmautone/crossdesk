@@ -19,7 +19,9 @@ const MAX_DOWNLOAD: u64 = 200 * 1024 * 1024;
 
 /// Build number baked in by CI. Local builds are 0 and never update on their own.
 pub fn build() -> u64 {
-    option_env!("CROSSDESK_BUILD").and_then(|s| s.parse().ok()).unwrap_or(0)
+    option_env!("CROSSDESK_BUILD")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
 }
 
 fn asset_name() -> Option<&'static str> {
@@ -123,7 +125,10 @@ fn api_get(url: &str, token: &str, accept: &str) -> Result<ureq::Response, Strin
     };
     // Asset downloads redirect to a signed storage URL that must not get our token.
     if (300..400).contains(&resp.status()) {
-        let location = resp.header("Location").ok_or("redirect without location")?.to_string();
+        let location = resp
+            .header("Location")
+            .ok_or("redirect without location")?
+            .to_string();
         return agent(5).get(&location).call().map_err(|e| e.to_string());
     }
     Ok(resp)
@@ -131,19 +136,28 @@ fn api_get(url: &str, token: &str, accept: &str) -> Result<ureq::Response, Strin
 
 fn download(asset: &Asset, token: &str) -> Result<Vec<u8>, String> {
     let resp = if token.is_empty() {
-        agent(5).get(&asset.browser_download_url).call().map_err(|e| e.to_string())?
+        agent(5)
+            .get(&asset.browser_download_url)
+            .call()
+            .map_err(|e| e.to_string())?
     } else {
         api_get(&asset.url, token, "application/octet-stream")?
     };
     let mut bytes = Vec::new();
-    resp.into_reader().take(MAX_DOWNLOAD).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    resp.into_reader()
+        .take(MAX_DOWNLOAD)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
     Ok(bytes)
 }
 
 fn check_and_install(shared: &Arc<Shared>) -> Result<(), String> {
     let (repo, token) = {
         let c = shared.config.lock();
-        (c.settings.update_repo.trim().to_string(), c.settings.github_token.trim().to_string())
+        (
+            c.settings.update_repo.trim().to_string(),
+            c.settings.github_token.trim().to_string(),
+        )
     };
     if repo.is_empty() {
         return Err("no update repository set".into());
@@ -151,8 +165,9 @@ fn check_and_install(shared: &Arc<Shared>) -> Result<(), String> {
     let name = asset_name().ok_or("updates are not supported on this OS")?;
     shared.set_update_status("Checking for updates…".into());
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let release: Release =
-        api_get(&url, &token, "application/vnd.github+json")?.into_json().map_err(|e| e.to_string())?;
+    let release: Release = api_get(&url, &token, "application/vnd.github+json")?
+        .into_json()
+        .map_err(|e| e.to_string())?;
     let latest: u64 = release
         .tag_name
         .strip_prefix("build-")
@@ -162,16 +177,26 @@ fn check_and_install(shared: &Arc<Shared>) -> Result<(), String> {
         shared.set_update_status(format!("Up to date (build {})", build()));
         return Ok(());
     }
-    let asset = release.assets.iter().find(|a| a.name == name).ok_or_else(|| format!("release has no {name}"))?;
-    let checksum = release.assets.iter().find(|a| a.name == format!("{name}.sha256"));
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == name)
+        .ok_or_else(|| format!("release has no {name}"))?;
+    let checksum = release
+        .assets
+        .iter()
+        .find(|a| a.name == format!("{name}.sha256"));
 
     // Never swap the app while the mouse is on, or coming from, another machine.
     loop {
-        let busy = shared.engine.lock().active_target().is_some() || shared.controlled_by.lock().is_some();
+        let busy =
+            shared.engine.lock().active_target().is_some() || shared.controlled_by.lock().is_some();
         if !busy {
             break;
         }
-        shared.set_update_status(format!("Build {latest} ready; waiting until the mouse is back home"));
+        shared.set_update_status(format!(
+            "Build {latest} ready; waiting until the mouse is back home"
+        ));
         std::thread::sleep(Duration::from_secs(3));
     }
 
@@ -179,7 +204,11 @@ fn check_and_install(shared: &Arc<Shared>) -> Result<(), String> {
     let bytes = download(asset, &token)?;
     if let Some(c) = checksum {
         let text = String::from_utf8(download(c, &token)?).map_err(|_| "bad checksum file")?;
-        let expected = text.split_whitespace().next().unwrap_or_default().to_lowercase();
+        let expected = text
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_lowercase();
         let actual = hex::encode(Sha256::digest(&bytes));
         if expected != actual {
             return Err("downloaded file is corrupted (checksum mismatch)".into());
@@ -195,7 +224,11 @@ fn restart(target: Relaunch) -> ! {
     crate::input::shutdown();
     let result = match &target {
         Relaunch::Exe(p) => std::process::Command::new(p).spawn().map(|_| ()),
-        Relaunch::Bundle(p) => std::process::Command::new("open").arg("-n").arg(p).spawn().map(|_| ()),
+        Relaunch::Bundle(p) => std::process::Command::new("open")
+            .arg("-n")
+            .arg(p)
+            .spawn()
+            .map(|_| ()),
     };
     if let Err(e) = result {
         eprintln!("could not restart after update: {e}");
@@ -252,10 +285,16 @@ fn install(bytes: &[u8]) -> Result<Relaunch, String> {
         .and_then(Path::parent)
         .filter(|b| b.extension().is_some_and(|e| e == "app"))
         .map(Path::to_path_buf);
-    let base = bundle.as_ref().and_then(|b| b.parent()).or(exe.parent()).ok_or("no install folder")?.to_path_buf();
+    let base = bundle
+        .as_ref()
+        .and_then(|b| b.parent())
+        .or(exe.parent())
+        .ok_or("no install folder")?
+        .to_path_buf();
     let work = base.join(format!(".crossdesk-update-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
-    std::fs::create_dir_all(&work).map_err(|e| format!("cannot write to {}: {e}", base.display()))?;
+    std::fs::create_dir_all(&work)
+        .map_err(|e| format!("cannot write to {}: {e}", base.display()))?;
     let zip = work.join("update.zip");
     std::fs::write(&zip, bytes).map_err(|e| e.to_string())?;
     let ok = std::process::Command::new("ditto")
@@ -273,7 +312,8 @@ fn install(bytes: &[u8]) -> Result<Relaunch, String> {
     let result = match &bundle {
         Some(bundle) => {
             let old = work.join("previous.app");
-            std::fs::rename(bundle, &old).map_err(|e| format!("cannot move the running app aside: {e}"))?;
+            std::fs::rename(bundle, &old)
+                .map_err(|e| format!("cannot move the running app aside: {e}"))?;
             if let Err(e) = std::fs::rename(&new_app, bundle) {
                 let _ = std::fs::rename(&old, bundle);
                 Err(format!("cannot put the new app in place: {e}"))
@@ -284,7 +324,8 @@ fn install(bytes: &[u8]) -> Result<Relaunch, String> {
         None => {
             // Running a bare binary (e.g. from a terminal): replace just the executable.
             let tmp = exe.with_extension("new");
-            std::fs::copy(new_app.join("Contents/MacOS/crossdesk"), &tmp).map_err(|e| e.to_string())?;
+            std::fs::copy(new_app.join("Contents/MacOS/crossdesk"), &tmp)
+                .map_err(|e| e.to_string())?;
             let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
             std::fs::rename(&tmp, &exe).map_err(|e| e.to_string())?;
             Ok(Relaunch::Exe(exe.clone()))

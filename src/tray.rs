@@ -20,14 +20,20 @@ fn decode(bytes: &[u8]) -> (Vec<u8>, u32, u32) {
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::ALPHA);
     let mut reader = decoder.read_info().expect("bundled icon is a valid PNG");
     let mut buf = vec![0; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).expect("bundled icon is a valid PNG");
+    let info = reader
+        .next_frame(&mut buf)
+        .expect("bundled icon is a valid PNG");
     buf.truncate(info.buffer_size());
     (buf, info.width, info.height)
 }
 
 pub fn window_icon() -> egui::IconData {
     let (rgba, width, height) = decode(include_bytes!("../assets/generated/window-256.png"));
-    egui::IconData { rgba, width, height }
+    egui::IconData {
+        rgba,
+        width,
+        height,
+    }
 }
 
 /// macOS gets a black template image it tints for the menu bar; Windows the color icon.
@@ -59,7 +65,8 @@ impl Tray {
         let lock = CheckMenuItem::new("Keep cursor on this computer", true, false, None);
         let quit = MenuItem::new("Quit crossdesk", true, None);
         let menu = Menu::new();
-        menu.append_items(&[&open, &lock, &PredefinedMenuItem::separator(), &quit]).map_err(|e| e.to_string())?;
+        menu.append_items(&[&open, &lock, &PredefinedMenuItem::separator(), &quit])
+            .map_err(|e| e.to_string())?;
 
         let mono = cfg!(target_os = "macos");
         let icon = tray_icon()?;
@@ -92,7 +99,12 @@ impl Tray {
             }
         }));
         TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
-            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = e
+            {
                 if !cfg!(target_os = "macos") {
                     show_window(&ctx);
                 }

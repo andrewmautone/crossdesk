@@ -54,7 +54,11 @@ pub struct Injector {
 impl Injector {
     #[allow(clippy::default_constructed_unit_structs)]
     pub fn new() -> Injector {
-        Injector { backend: Platform::default(), keys: HashSet::new(), buttons: HashSet::new() }
+        Injector {
+            backend: Platform::default(),
+            keys: HashSet::new(),
+            buttons: HashSet::new(),
+        }
     }
 
     pub fn move_abs(&mut self, x: i32, y: i32) {

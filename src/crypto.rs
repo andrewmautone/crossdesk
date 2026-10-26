@@ -38,10 +38,14 @@ impl Pake {
     }
 
     pub fn finish(self, peer_msg: &[u8]) -> Result<[u8; 32], String> {
-        let key = self.0.finish(peer_msg).map_err(|e| format!("pairing failed: {e:?}"))?;
+        let key = self
+            .0
+            .finish(peer_msg)
+            .map_err(|e| format!("pairing failed: {e:?}"))?;
         let mut out = [0u8; 32];
         let hk = Hkdf::<Sha256>::new(None, &key);
-        hk.expand(b"crossdesk long-term key", &mut out).map_err(|e| e.to_string())?;
+        hk.expand(b"crossdesk long-term key", &mut out)
+            .map_err(|e| e.to_string())?;
         Ok(out)
     }
 }
@@ -64,7 +68,10 @@ fn nonce(counter: u64) -> Nonce {
 
 impl SendCipher {
     pub fn seal(&mut self, plain: &[u8]) -> Vec<u8> {
-        let out = self.aead.encrypt(&nonce(self.counter), plain).expect("encryption cannot fail");
+        let out = self
+            .aead
+            .encrypt(&nonce(self.counter), plain)
+            .expect("encryption cannot fail");
         self.counter += 1;
         out
     }
@@ -82,7 +89,12 @@ impl RecvCipher {
 }
 
 /// Derive this side's (send, recv) ciphers. `client_nonce`/`server_nonce` are the hello nonces.
-pub fn session(key: &[u8; 32], client_nonce: &str, server_nonce: &str, is_client: bool) -> (SendCipher, RecvCipher) {
+pub fn session(
+    key: &[u8; 32],
+    client_nonce: &str,
+    server_nonce: &str,
+    is_client: bool,
+) -> (SendCipher, RecvCipher) {
     let salt = format!("{client_nonce}{server_nonce}");
     let hk = Hkdf::<Sha256>::new(Some(salt.as_bytes()), key);
     let mut c2s = [0u8; 32];
@@ -91,8 +103,14 @@ pub fn session(key: &[u8; 32], client_nonce: &str, server_nonce: &str, is_client
     hk.expand(b"crossdesk s2c", &mut s2c).expect("valid length");
     let (send, recv) = if is_client { (c2s, s2c) } else { (s2c, c2s) };
     (
-        SendCipher { aead: ChaCha20Poly1305::new(Key::from_slice(&send)), counter: 0 },
-        RecvCipher { aead: ChaCha20Poly1305::new(Key::from_slice(&recv)), counter: 0 },
+        SendCipher {
+            aead: ChaCha20Poly1305::new(Key::from_slice(&send)),
+            counter: 0,
+        },
+        RecvCipher {
+            aead: ChaCha20Poly1305::new(Key::from_slice(&recv)),
+            counter: 0,
+        },
     )
 }
 

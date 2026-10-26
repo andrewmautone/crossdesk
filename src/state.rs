@@ -62,7 +62,9 @@ pub struct Shared {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 impl Shared {
@@ -73,7 +75,12 @@ impl Shared {
     pub fn with_config(rt: tokio::runtime::Handle, config: Config) -> Arc<Shared> {
         let registry = Arc::new(Registry::default());
         let clipboard = Clipboard::start(registry.clone());
-        let engine = Engine::new(config.id.clone(), config.settings.clone(), registry.clone(), clipboard.clone());
+        let engine = Engine::new(
+            config.id.clone(),
+            config.settings.clone(),
+            registry.clone(),
+            clipboard.clone(),
+        );
         let shared = Arc::new(Shared {
             rt,
             config: Mutex::new(config),
@@ -168,16 +175,34 @@ impl Shared {
             let scale = if i == 0 {
                 1.0
             } else {
-                let h = mons.iter().find(|m| m.primary).or(mons.first()).map_or(1.0, |m| m.h as f64);
+                let h = mons
+                    .iter()
+                    .find(|m| m.primary)
+                    .or(mons.first())
+                    .map_or(1.0, |m| m.h as f64);
                 (local_h / h.max(1.0) * 100.0).round() / 100.0
             };
             let world = World::build(machines, layout);
-            let right = world.monitors.iter().map(|m| m.rect.right()).fold(f64::NEG_INFINITY, f64::max);
-            let top = world.monitors.iter().map(|m| m.rect.y).fold(f64::INFINITY, f64::min);
+            let right = world
+                .monitors
+                .iter()
+                .map(|m| m.rect.right())
+                .fold(f64::NEG_INFINITY, f64::max);
+            let top = world
+                .monitors
+                .iter()
+                .map(|m| m.rect.y)
+                .fold(f64::INFINITY, f64::min);
             let min_x = mons.iter().map(|m| m.x).min().unwrap_or(0) as f64 * scale;
             let min_y = mons.iter().map(|m| m.y).min().unwrap_or(0) as f64 * scale;
-            let (x, y) = if right.is_finite() { (right - min_x, top - min_y) } else { (0.0, 0.0) };
-            layout.placements.insert(id.clone(), Placement { x, y, scale });
+            let (x, y) = if right.is_finite() {
+                (right - min_x, top - min_y)
+            } else {
+                (0.0, 0.0)
+            };
+            layout
+                .placements
+                .insert(id.clone(), Placement { x, y, scale });
             changed = true;
         }
         changed
@@ -257,10 +282,17 @@ impl Shared {
 
     pub fn trust(&self, id: &str, name: &str, os: &str, key: &[u8; 32], addr: Option<SocketAddr>) {
         let mut c = self.config.lock();
-        let last_addr = addr.map(|a| a.to_string()).or_else(|| c.trusted.get(id).and_then(|t| t.last_addr.clone()));
+        let last_addr = addr
+            .map(|a| a.to_string())
+            .or_else(|| c.trusted.get(id).and_then(|t| t.last_addr.clone()));
         c.trusted.insert(
             id.to_string(),
-            TrustedPeer { name: name.into(), os: os.into(), key: hex::encode(key), last_addr },
+            TrustedPeer {
+                name: name.into(),
+                os: os.into(),
+                key: hex::encode(key),
+                last_addr,
+            },
         );
         c.save();
     }
@@ -294,11 +326,18 @@ impl Shared {
         }
         drop(failures);
         let mut incoming = self.incoming_pair.lock();
-        if incoming.as_ref().is_some_and(|p| p.since.elapsed() < Duration::from_secs(120)) {
+        if incoming
+            .as_ref()
+            .is_some_and(|p| p.since.elapsed() < Duration::from_secs(120))
+        {
             return Err("another pairing is in progress".into());
         }
         let code = crate::crypto::pairing_code();
-        *incoming = Some(IncomingPair { peer_name: peer_name.into(), code: code.clone(), since: Instant::now() });
+        *incoming = Some(IncomingPair {
+            peer_name: peer_name.into(),
+            code: code.clone(),
+            since: Instant::now(),
+        });
         drop(incoming);
         self.repaint();
         Ok(code)
@@ -339,7 +378,12 @@ impl Shared {
     pub fn handle_msg(&self, peer: &str, peer_os: &str, msg: Msg) {
         match msg {
             Msg::Auth => {}
-            Msg::Info { name, os, build, monitors } => {
+            Msg::Info {
+                name,
+                os,
+                build,
+                monitors,
+            } => {
                 if build > crate::updater::build() {
                     if let Some(u) = self.updater.get() {
                         u.peer_is_newer();
@@ -402,17 +446,27 @@ impl Shared {
                     self.repaint();
                 }
             }
-            Msg::MouseMove { x, y } if self.is_controller(peer) => self.injector.lock().move_abs(x, y),
+            Msg::MouseMove { x, y } if self.is_controller(peer) => {
+                self.injector.lock().move_abs(x, y)
+            }
             Msg::MouseButton { button, down } if self.is_controller(peer) => {
                 self.injector.lock().button(button, down)
             }
             Msg::Wheel { dx, dy } if self.is_controller(peer) => {
-                let (dx, dy) = if self.config.lock().settings.invert_scroll { (-dx, -dy) } else { (dx, dy) };
+                let (dx, dy) = if self.config.lock().settings.invert_scroll {
+                    (-dx, -dy)
+                } else {
+                    (dx, dy)
+                };
                 self.injector.lock().wheel(dx, dy)
             }
             Msg::Key { hid, down } if self.is_controller(peer) => {
                 let swap = self.config.lock().settings.swap_ctrl_cmd && peer_os != this_os();
-                let hid = if swap { keymap::swap_ctrl_meta(hid) } else { hid };
+                let hid = if swap {
+                    keymap::swap_ctrl_meta(hid)
+                } else {
+                    hid
+                };
                 self.injector.lock().key(hid, down)
             }
             Msg::Clipboard(text) => {

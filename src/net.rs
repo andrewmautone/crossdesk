@@ -33,7 +33,10 @@ pub struct Registry {
 
 impl Registry {
     pub fn send(&self, peer: &str, msg: Msg) -> bool {
-        self.conns.lock().get(peer).is_some_and(|c| c.tx.send(msg).is_ok())
+        self.conns
+            .lock()
+            .get(peer)
+            .is_some_and(|c| c.tx.send(msg).is_ok())
     }
 
     pub fn broadcast(&self, msg: Msg) {
@@ -55,7 +58,13 @@ impl Registry {
 
     /// Two machines may dial each other at the same time. Both sides keep the
     /// connection dialed by the smaller id, so they always agree on one.
-    pub(crate) fn register(&self, peer: &str, preferred: bool, tx: mpsc::UnboundedSender<Msg>, kill: Arc<Notify>) -> Option<u64> {
+    pub(crate) fn register(
+        &self,
+        peer: &str,
+        preferred: bool,
+        tx: mpsc::UnboundedSender<Msg>,
+        kill: Arc<Notify>,
+    ) -> Option<u64> {
         let mut conns = self.conns.lock();
         if let Some(old) = conns.get(peer) {
             if old.preferred || !preferred {
@@ -64,7 +73,15 @@ impl Registry {
             old.kill.notify_one();
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        conns.insert(peer.to_string(), Conn { id, preferred, tx, kill });
+        conns.insert(
+            peer.to_string(),
+            Conn {
+                id,
+                preferred,
+                tx,
+                kill,
+            },
+        );
         Some(id)
     }
 
@@ -131,9 +148,15 @@ async fn recv_json<T: serde::de::DeserializeOwned>(stream: &mut TcpStream) -> Re
     serde_json::from_slice(&data).map_err(|e| format!("bad handshake: {e}"))
 }
 
-async fn send_sealed(stream: &mut TcpStream, cipher: &mut SendCipher, msg: &Msg) -> Result<(), String> {
+async fn send_sealed(
+    stream: &mut TcpStream,
+    cipher: &mut SendCipher,
+    msg: &Msg,
+) -> Result<(), String> {
     let data = bincode::serialize(msg).map_err(|e| e.to_string())?;
-    write_frame(stream, &cipher.seal(&data)).await.map_err(|e| e.to_string())
+    write_frame(stream, &cipher.seal(&data))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 async fn recv_sealed(stream: &mut TcpStream, cipher: &mut RecvCipher) -> Result<Msg, String> {
@@ -168,7 +191,12 @@ async fn serve(shared: Arc<Shared>, mut stream: TcpStream, addr: SocketAddr) -> 
 
     let key = match hello.mode {
         HelloMode::Resume => {
-            let key = shared.config.lock().trusted.get(&hello.id).and_then(|t| t.key_bytes());
+            let key = shared
+                .config
+                .lock()
+                .trusted
+                .get(&hello.id)
+                .and_then(|t| t.key_bytes());
             let Some(key) = key else {
                 reply.ok = false;
                 reply.reason = "not paired with this machine".into();
@@ -191,7 +219,9 @@ async fn serve(shared: Arc<Shared>, mut stream: TcpStream, addr: SocketAddr) -> 
             send_json(&mut stream, &reply).await?;
             let result = async {
                 let (pake, msg) = Pake::start(&code);
-                write_frame(&mut stream, &msg).await.map_err(|e| e.to_string())?;
+                write_frame(&mut stream, &msg)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 let peer_msg = timeout(CODE_TIMEOUT, read_frame(&mut stream))
                     .await
                     .map_err(|_| "pairing timed out".to_string())?
@@ -226,12 +256,20 @@ async fn serve(shared: Arc<Shared>, mut stream: TcpStream, addr: SocketAddr) -> 
         shared.trust(&hello.id, &hello.name, &hello.os, &key, None);
         shared.log(format!("paired with {}", hello.name));
     }
-    run_session(shared, hello.id, hello.name, hello.os, addr, stream, send, recv, false).await;
+    run_session(
+        shared, hello.id, hello.name, hello.os, addr, stream, send, recv, false,
+    )
+    .await;
     Ok(())
 }
 
 /// Client side of the handshake.
-pub async fn dial(shared: Arc<Shared>, addr: SocketAddr, mode: HelloMode, expect_id: Option<String>) -> Result<(), String> {
+pub async fn dial(
+    shared: Arc<Shared>,
+    addr: SocketAddr,
+    mode: HelloMode,
+    expect_id: Option<String>,
+) -> Result<(), String> {
     let mut stream = timeout(HANDSHAKE_TIMEOUT, TcpStream::connect(addr))
         .await
         .map_err(|_| format!("{addr}: connection timed out"))?
@@ -257,7 +295,10 @@ pub async fn dial(shared: Arc<Shared>, addr: SocketAddr, mode: HelloMode, expect
         return Err(format!("{} refused: {}", reply.name, reply.reason));
     }
     if expect_id.as_ref().is_some_and(|id| *id != reply.id) {
-        return Err(format!("{addr} is now a different machine ({})", reply.name));
+        return Err(format!(
+            "{addr} is now a different machine ({})",
+            reply.name
+        ));
     }
 
     let key = match mode {
@@ -274,8 +315,11 @@ pub async fn dial(shared: Arc<Shared>, addr: SocketAddr, mode: HelloMode, expect
                 .map_err(|_| "pairing timed out".to_string())?
                 .map_err(|e| e.to_string())?;
             let (code_tx, code_rx) = oneshot::channel();
-            *shared.outgoing_pair.lock() =
-                Some(OutgoingPair { peer_name: reply.name.clone(), code_tx: Some(code_tx), error: None });
+            *shared.outgoing_pair.lock() = Some(OutgoingPair {
+                peer_name: reply.name.clone(),
+                code_tx: Some(code_tx),
+                error: None,
+            });
             let code = match timeout(CODE_TIMEOUT, code_rx).await {
                 Ok(Ok(code)) => code,
                 _ => {
@@ -284,7 +328,9 @@ pub async fn dial(shared: Arc<Shared>, addr: SocketAddr, mode: HelloMode, expect
                 }
             };
             let (pake, msg) = Pake::start(&code);
-            write_frame(&mut stream, &msg).await.map_err(|e| e.to_string())?;
+            write_frame(&mut stream, &msg)
+                .await
+                .map_err(|e| e.to_string())?;
             pake.finish(&server_msg)?
         }
     };
@@ -310,7 +356,10 @@ pub async fn dial(shared: Arc<Shared>, addr: SocketAddr, mode: HelloMode, expect
         shared.log(format!("paired with {}", reply.name));
     }
     shared.trust(&reply.id, &reply.name, &reply.os, &key, Some(addr));
-    run_session(shared, reply.id, reply.name, reply.os, addr, stream, send, recv, true).await;
+    run_session(
+        shared, reply.id, reply.name, reply.os, addr, stream, send, recv, true,
+    )
+    .await;
     Ok(())
 }
 
@@ -327,10 +376,17 @@ async fn run_session(
     dialed_by_me: bool,
 ) {
     let my_id = shared.config.lock().id.clone();
-    let preferred = if dialed_by_me { my_id < peer_id } else { peer_id < my_id };
+    let preferred = if dialed_by_me {
+        my_id < peer_id
+    } else {
+        peer_id < my_id
+    };
     let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
     let kill = Arc::new(Notify::new());
-    let Some(conn_id) = shared.registry.register(&peer_id, preferred, tx.clone(), kill.clone()) else {
+    let Some(conn_id) = shared
+        .registry
+        .register(&peer_id, preferred, tx.clone(), kill.clone())
+    else {
         return; // a better connection to this peer already exists
     };
     shared.log(format!("connected to {peer_name} ({addr})"));
@@ -338,7 +394,9 @@ async fn run_session(
     let (mut rd, mut wr): (OwnedReadHalf, OwnedWriteHalf) = stream.into_split();
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            let Ok(data) = bincode::serialize(&msg) else { continue };
+            let Ok(data) = bincode::serialize(&msg) else {
+                continue;
+            };
             if write_frame(&mut wr, &send.seal(&data)).await.is_err() {
                 break;
             }
@@ -347,7 +405,12 @@ async fn run_session(
 
     shared.peers.lock().insert(
         peer_id.clone(),
-        PeerInfo { conn_id, name: peer_name.clone(), os: peer_os.clone(), monitors: Vec::new() },
+        PeerInfo {
+            conn_id,
+            name: peer_name.clone(),
+            os: peer_os.clone(),
+            monitors: Vec::new(),
+        },
     );
     let _ = tx.send(shared.info_msg());
     let _ = tx.send(Msg::Layout(shared.config.lock().layout.clone()));
@@ -359,7 +422,10 @@ async fn run_session(
             _ = kill.notified() => break,
         };
         let Ok(frame) = frame else { break };
-        let msg = match recv.open(&frame).and_then(|p| bincode::deserialize::<Msg>(&p).map_err(|e| e.to_string())) {
+        let msg = match recv
+            .open(&frame)
+            .and_then(|p| bincode::deserialize::<Msg>(&p).map_err(|e| e.to_string()))
+        {
             Ok(m) => m,
             Err(e) => {
                 shared.log(format!("{peer_name}: {e}"));
@@ -384,7 +450,9 @@ async fn discovery(shared: Arc<Shared>) {
                 bound = Some(s);
                 break;
             }
-            Err(e) if attempt == 19 => shared.log(format!("discovery disabled (UDP {DISCOVERY_PORT}): {e}")),
+            Err(e) if attempt == 19 => {
+                shared.log(format!("discovery disabled (UDP {DISCOVERY_PORT}): {e}"))
+            }
             Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
         }
     }
@@ -398,7 +466,13 @@ async fn discovery(shared: Arc<Shared>) {
         loop {
             let announce = {
                 let c = s.config.lock();
-                Announce { app: APP.into(), id: c.id.clone(), name: c.name.clone(), os: this_os().into(), port: c.port }
+                Announce {
+                    app: APP.into(),
+                    id: c.id.clone(),
+                    name: c.name.clone(),
+                    os: this_os().into(),
+                    port: c.port,
+                }
             };
             if let Ok(data) = serde_json::to_vec(&announce) {
                 for target in broadcast_targets() {
@@ -411,15 +485,24 @@ async fn discovery(shared: Arc<Shared>) {
 
     let mut buf = [0u8; 2048];
     loop {
-        let Ok((n, src)) = sock.recv_from(&mut buf).await else { continue };
-        let Ok(a) = serde_json::from_slice::<Announce>(&buf[..n]) else { continue };
+        let Ok((n, src)) = sock.recv_from(&mut buf).await else {
+            continue;
+        };
+        let Ok(a) = serde_json::from_slice::<Announce>(&buf[..n]) else {
+            continue;
+        };
         if a.app != APP || a.id == shared.config.lock().id {
             continue;
         }
         let addr = SocketAddr::new(src.ip(), a.port);
         shared.discovered.lock().insert(
             a.id.clone(),
-            Discovered { name: a.name, os: a.os, addr, last_seen: Instant::now() },
+            Discovered {
+                name: a.name,
+                os: a.os,
+                addr,
+                last_seen: Instant::now(),
+            },
         );
     }
 }
@@ -449,15 +532,27 @@ async fn connector(shared: Arc<Shared>) {
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
         let my_id = shared.config.lock().id.clone();
-        let trusted: Vec<(String, Option<String>)> =
-            shared.config.lock().trusted.iter().map(|(id, t)| (id.clone(), t.last_addr.clone())).collect();
+        let trusted: Vec<(String, Option<String>)> = shared
+            .config
+            .lock()
+            .trusted
+            .iter()
+            .map(|(id, t)| (id.clone(), t.last_addr.clone()))
+            .collect();
         for (id, last_addr) in trusted {
             if shared.registry.is_connected(&id) || in_flight.lock().contains(&id) {
                 waiting_since.remove(&id);
                 continue;
             }
-            let seen = shared.discovered.lock().get(&id).filter(|d| d.last_seen.elapsed() < Duration::from_secs(10)).map(|d| d.addr);
-            let Some(addr) = seen.or_else(|| last_addr.and_then(|a| a.parse().ok())) else { continue };
+            let seen = shared
+                .discovered
+                .lock()
+                .get(&id)
+                .filter(|d| d.last_seen.elapsed() < Duration::from_secs(10))
+                .map(|d| d.addr);
+            let Some(addr) = seen.or_else(|| last_addr.and_then(|a| a.parse().ok())) else {
+                continue;
+            };
             // The smaller id dials first; the other side waits a bit in case
             // discovery only works in one direction.
             let since = *waiting_since.entry(id.clone()).or_insert_with(Instant::now);
@@ -484,7 +579,11 @@ pub fn start_pairing(shared: Arc<Shared>, addr: SocketAddr) {
             s.log(e.clone());
             let mut p = s.outgoing_pair.lock();
             if p.as_ref().is_none_or(|p| p.error.is_none()) {
-                *p = Some(OutgoingPair { peer_name: addr.to_string(), code_tx: None, error: Some(e) });
+                *p = Some(OutgoingPair {
+                    peer_name: addr.to_string(),
+                    code_tx: None,
+                    error: Some(e),
+                });
             }
         }
     });
@@ -541,17 +640,36 @@ mod tests {
         let b_id = b.config.lock().id.clone();
 
         start_pair(&a, addr_b);
-        let code = wait_for("code on B", || b.incoming_pair.lock().as_ref().map(|p| p.code.clone())).await;
-        let tx = wait_for("code prompt on A", || a.outgoing_pair.lock().as_mut().and_then(|p| p.code_tx.take())).await;
+        let code = wait_for("code on B", || {
+            b.incoming_pair.lock().as_ref().map(|p| p.code.clone())
+        })
+        .await;
+        let tx = wait_for("code prompt on A", || {
+            a.outgoing_pair
+                .lock()
+                .as_mut()
+                .and_then(|p| p.code_tx.take())
+        })
+        .await;
         tx.send(code).unwrap();
 
-        wait_for("connection", || (a.registry.is_connected(&b_id) && b.registry.is_connected(&a_id)).then_some(())).await;
+        wait_for("connection", || {
+            (a.registry.is_connected(&b_id) && b.registry.is_connected(&a_id)).then_some(())
+        })
+        .await;
         assert!(a.config.lock().trusted.contains_key(&b_id));
         assert!(b.config.lock().trusted.contains_key(&a_id));
         assert!(b.incoming_pair.lock().is_none());
 
         // Monitors are exchanged and both sides converge on one layout with both machines.
-        wait_for("monitors", || b.peers.lock().get(&a_id).filter(|p| !p.monitors.is_empty()).map(|_| ())).await;
+        wait_for("monitors", || {
+            b.peers
+                .lock()
+                .get(&a_id)
+                .filter(|p| !p.monitors.is_empty())
+                .map(|_| ())
+        })
+        .await;
         wait_for("same layout", || {
             let la = a.config.lock().layout.clone();
             let lb = b.config.lock().layout.clone();
@@ -563,20 +681,33 @@ mod tests {
         let mut edited = a.config.lock().layout.clone();
         edited.placements.get_mut(&b_id).unwrap().y += 100.0;
         a.set_layout(edited.clone());
-        wait_for("edited layout", || (b.config.lock().layout.placements == edited.placements).then_some(())).await;
+        wait_for("edited layout", || {
+            (b.config.lock().layout.placements == edited.placements).then_some(())
+        })
+        .await;
 
         // After a disconnect the stored key lets them reconnect without a code.
         a.registry.disconnect(&b_id);
-        wait_for("disconnect", || (!b.registry.is_connected(&a_id) && !a.registry.is_connected(&b_id)).then_some(())).await;
+        wait_for("disconnect", || {
+            (!b.registry.is_connected(&a_id) && !a.registry.is_connected(&b_id)).then_some(())
+        })
+        .await;
         assert!(a.peers.lock().is_empty());
         let a2 = a.clone();
         let id = b_id.clone();
         tokio::spawn(async move { dial(a2, addr_b, HelloMode::Resume, Some(id)).await });
-        wait_for("reconnect", || (a.registry.is_connected(&b_id) && b.registry.is_connected(&a_id)).then_some(())).await;
+        wait_for("reconnect", || {
+            (a.registry.is_connected(&b_id) && b.registry.is_connected(&a_id)).then_some(())
+        })
+        .await;
 
         // Forgetting removes the pairing on both sides.
         a.forget(&b_id);
-        wait_for("unpair", || (!b.config.lock().trusted.contains_key(&a_id) && !b.registry.is_connected(&a_id)).then_some(())).await;
+        wait_for("unpair", || {
+            (!b.config.lock().trusted.contains_key(&a_id) && !b.registry.is_connected(&a_id))
+                .then_some(())
+        })
+        .await;
         assert!(!a.config.lock().trusted.contains_key(&b_id));
     }
 
@@ -585,11 +716,26 @@ mod tests {
         let (a, _) = peer_with_listener("A").await;
         let (b, addr_b) = peer_with_listener("B").await;
         start_pair(&a, addr_b);
-        let code = wait_for("code on B", || b.incoming_pair.lock().as_ref().map(|p| p.code.clone())).await;
+        let code = wait_for("code on B", || {
+            b.incoming_pair.lock().as_ref().map(|p| p.code.clone())
+        })
+        .await;
         let wrong = if code == "000000" { "111111" } else { "000000" };
-        let tx = wait_for("code prompt on A", || a.outgoing_pair.lock().as_mut().and_then(|p| p.code_tx.take())).await;
+        let tx = wait_for("code prompt on A", || {
+            a.outgoing_pair
+                .lock()
+                .as_mut()
+                .and_then(|p| p.code_tx.take())
+        })
+        .await;
         tx.send(wrong.into()).unwrap();
-        let err = wait_for("error on A", || a.outgoing_pair.lock().as_ref().and_then(|p| p.error.clone())).await;
+        let err = wait_for("error on A", || {
+            a.outgoing_pair
+                .lock()
+                .as_ref()
+                .and_then(|p| p.error.clone())
+        })
+        .await;
         assert!(err.contains("Wrong code"), "{err}");
         assert!(a.config.lock().trusted.is_empty());
         assert!(b.config.lock().trusted.is_empty());

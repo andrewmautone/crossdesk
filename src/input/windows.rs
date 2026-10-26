@@ -7,11 +7,21 @@ use crate::state::Shared;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use windows::core::w;
 use windows::Win32::Foundation::{BOOL, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW};
+use windows::Win32::Foundation::{HINSTANCE, HWND};
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
+use windows::Win32::UI::Input::{
+    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT,
+    RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEMOUSE,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// Marks events we inject so our own hooks ignore them.
@@ -57,6 +67,11 @@ pub fn start_capture(shared: Arc<Shared>) {
                 *shared.capture_error.lock() = Some(format!("cannot install input hooks: {e}"));
                 return;
             }
+            if let Err(e) = raw_input_window(hinst) {
+                shared.log(format!(
+                    "raw mouse input unavailable, edge push disabled: {e}"
+                ));
+            }
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 let _ = TranslateMessage(&msg);
@@ -71,7 +86,9 @@ fn shared() -> Option<&'static Arc<Shared>> {
 }
 
 fn park_point(pt: (i32, i32)) -> (i32, i32) {
-    let mons = shared().map(|s| s.local_monitors.lock().clone()).unwrap_or_default();
+    let mons = shared()
+        .map(|s| s.local_monitors.lock().clone())
+        .unwrap_or_default();
     let m = mons
         .iter()
         .find(|m| pt.0 >= m.x && pt.0 < m.x + m.w && pt.1 >= m.y && pt.1 < m.y + m.h)
@@ -106,7 +123,9 @@ pub fn warp(x: i32, y: i32) {
     show_cursor();
 }
 
-const CURSOR_IDS: [u32; 13] = [32512, 32513, 32514, 32515, 32516, 32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650];
+const CURSOR_IDS: [u32; 13] = [
+    32512, 32513, 32514, 32515, 32516, 32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650,
+];
 
 fn hide_cursor() {
     if HIDDEN.swap(true, Ordering::SeqCst) {
@@ -116,7 +135,15 @@ fn hide_cursor() {
     let xor_mask = [0u8; 128];
     for id in CURSOR_IDS {
         unsafe {
-            if let Ok(c) = CreateCursor(None, 0, 0, 32, 32, and_mask.as_ptr().cast(), xor_mask.as_ptr().cast()) {
+            if let Ok(c) = CreateCursor(
+                None,
+                0,
+                0,
+                32,
+                32,
+                and_mask.as_ptr().cast(),
+                xor_mask.as_ptr().cast(),
+            ) {
                 let _ = SetSystemCursor(c, SYSTEM_CURSOR_ID(id));
             }
         }
@@ -126,7 +153,12 @@ fn hide_cursor() {
 fn show_cursor() {
     if HIDDEN.swap(false, Ordering::SeqCst) {
         unsafe {
-            let _ = SystemParametersInfoW(SPI_SETCURSORS, 0, None, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
+            let _ = SystemParametersInfoW(
+                SPI_SETCURSORS,
+                0,
+                None,
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            );
         }
     }
 }
@@ -149,7 +181,9 @@ fn handle_mouse(msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
     match msg {
         WM_MOUSEMOVE => {
             let pt = (info.pt.x, info.pt.y);
-            let delta = PARK.lock().map(|p| ((pt.0 - p.0) as f64, (pt.1 - p.1) as f64));
+            let delta = PARK
+                .lock()
+                .map(|p| ((pt.0 - p.0) as f64, (pt.1 - p.1) as f64));
             let d = s.engine.lock().on_move(pt, delta);
             apply(d)
         }
@@ -160,7 +194,11 @@ fn handle_mouse(msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
         WM_MBUTTONDOWN => button(Button::Middle, true),
         WM_MBUTTONUP => button(Button::Middle, false),
         WM_XBUTTONDOWN | WM_XBUTTONUP => {
-            let b = if hi == XBUTTON2 { Button::Forward } else { Button::Back };
+            let b = if hi == XBUTTON2 {
+                Button::Forward
+            } else {
+                Button::Back
+            };
             button(b, msg == WM_XBUTTONDOWN)
         }
         WM_MOUSEWHEEL => s.engine.lock().on_wheel(0, hi as i16 as i32),
@@ -193,11 +231,89 @@ fn handle_key(msg: u32, info: &KBDLLHOOKSTRUCT) -> bool {
     let hid = match VIRTUAL_KEY(info.vkCode as u16) {
         VK_PAUSE => Some(0x48),
         VK_NUMLOCK => Some(0x53),
-        _ => keymap::hid_from_win(if extended { 0xE000 | sc } else { sc }).or_else(|| keymap::hid_from_win(sc)),
+        _ => keymap::hid_from_win(if extended { 0xE000 | sc } else { sc })
+            .or_else(|| keymap::hid_from_win(sc)),
     };
     let Some(hid) = hid else { return remote };
     let d = s.engine.lock().on_key(hid, down);
     apply(d)
+}
+
+/// A message-only window that receives raw mouse movement. Unlike the hook,
+/// raw input keeps reporting motion while the cursor is pinned on a screen edge,
+/// which is what measures the push needed to cross.
+unsafe fn raw_input_window(hinst: HINSTANCE) -> windows::core::Result<HWND> {
+    let class = w!("crossdesk-raw-input");
+    let wc = WNDCLASSW {
+        lpfnWndProc: Some(raw_input_proc),
+        hInstance: hinst,
+        lpszClassName: class,
+        ..Default::default()
+    };
+    RegisterClassW(&wc);
+    let hwnd = CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        class,
+        w!(""),
+        WINDOW_STYLE(0),
+        0,
+        0,
+        0,
+        0,
+        HWND_MESSAGE,
+        None,
+        hinst,
+        None,
+    )?;
+    let device = RAWINPUTDEVICE {
+        usUsagePage: 0x01,
+        usUsage: 0x02,
+        dwFlags: RIDEV_INPUTSINK,
+        hwndTarget: hwnd,
+    };
+    RegisterRawInputDevices(&[device], std::mem::size_of::<RAWINPUTDEVICE>() as u32)?;
+    Ok(hwnd)
+}
+
+unsafe extern "system" fn raw_input_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_INPUT {
+        handle_raw(HRAWINPUT(lparam.0 as _));
+    }
+    DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
+unsafe fn handle_raw(handle: HRAWINPUT) {
+    let Some(s) = shared() else { return };
+    if PARK.lock().is_some() {
+        return; // another machine has the cursor; the hook measures movement then
+    }
+    let mut raw = RAWINPUT::default();
+    let mut size = std::mem::size_of::<RAWINPUT>() as u32;
+    let n = GetRawInputData(
+        handle,
+        RID_INPUT,
+        Some(&mut raw as *mut RAWINPUT as *mut _),
+        &mut size,
+        std::mem::size_of::<RAWINPUTHEADER>() as u32,
+    );
+    // Injected input has no device; absolute devices (tablets, remote desktop) cannot push.
+    if n == u32::MAX || raw.header.dwType != RIM_TYPEMOUSE.0 || raw.header.hDevice.0.is_null() {
+        return;
+    }
+    let mouse = raw.data.mouse;
+    if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 || (mouse.lLastX == 0 && mouse.lLastY == 0) {
+        return;
+    }
+    let d = s
+        .engine
+        .lock()
+        .on_push_delta(mouse.lLastX as f64, mouse.lLastY as f64);
+    apply(d);
 }
 
 #[derive(Default)]
@@ -213,7 +329,14 @@ fn mouse_input(dx: i32, dy: i32, data: i32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
-            mi: MOUSEINPUT { dx, dy, mouseData: data as _, dwFlags: flags, time: 0, dwExtraInfo: MAGIC },
+            mi: MOUSEINPUT {
+                dx,
+                dy,
+                mouseData: data as _,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: MAGIC,
+            },
         },
     }
 }
@@ -224,8 +347,14 @@ unsafe extern "system" fn monitor_proc(hmon: HMONITOR, _: HDC, _: *mut RECT, dat
     info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
     if GetMonitorInfoW(hmon, &mut info.monitorInfo as *mut MONITORINFO).as_bool() {
         let r = info.monitorInfo.rcMonitor;
-        let len = info.szDevice.iter().position(|&c| c == 0).unwrap_or(info.szDevice.len());
-        let name = String::from_utf16_lossy(&info.szDevice[..len]).trim_start_matches("\\\\.\\").to_string();
+        let len = info
+            .szDevice
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(info.szDevice.len());
+        let name = String::from_utf16_lossy(&info.szDevice[..len])
+            .trim_start_matches("\\\\.\\")
+            .to_string();
         out.push(Monitor {
             x: r.left,
             y: r.top,
@@ -242,7 +371,12 @@ impl Backend for Platform {
     fn monitors() -> Vec<Monitor> {
         let mut out: Vec<Monitor> = Vec::new();
         unsafe {
-            let _ = EnumDisplayMonitors(HDC::default(), None, Some(monitor_proc), LPARAM(&mut out as *mut _ as isize));
+            let _ = EnumDisplayMonitors(
+                HDC::default(),
+                None,
+                Some(monitor_proc),
+                LPARAM(&mut out as *mut _ as isize),
+            );
         }
         out.sort_by_key(|m| (m.x, m.y));
         out
@@ -259,7 +393,12 @@ impl Backend for Platform {
         };
         let nx = ((x - vx) as i64 * 65535 / (vw - 1).max(1) as i64) as i32;
         let ny = ((y - vy) as i64 * 65535 / (vh - 1).max(1) as i64) as i32;
-        send(&[mouse_input(nx, ny, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)]);
+        send(&[mouse_input(
+            nx,
+            ny,
+            0,
+            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+        )]);
     }
 
     fn button(&mut self, button: Button, down: bool) {
@@ -288,12 +427,28 @@ impl Backend for Platform {
     }
 
     fn key(&mut self, hid: u16, down: bool) {
-        let up = if down { KEYBD_EVENT_FLAGS(0) } else { KEYEVENTF_KEYUP };
-        let ki = if hid == 0x48 {
-            KEYBDINPUT { wVk: VK_PAUSE, wScan: 0, dwFlags: up, time: 0, dwExtraInfo: MAGIC }
+        let up = if down {
+            KEYBD_EVENT_FLAGS(0)
         } else {
-            let Some(code) = keymap::win_from_hid(hid) else { return };
-            let ext = if code & 0xE000 == 0xE000 { KEYEVENTF_EXTENDEDKEY } else { KEYBD_EVENT_FLAGS(0) };
+            KEYEVENTF_KEYUP
+        };
+        let ki = if hid == 0x48 {
+            KEYBDINPUT {
+                wVk: VK_PAUSE,
+                wScan: 0,
+                dwFlags: up,
+                time: 0,
+                dwExtraInfo: MAGIC,
+            }
+        } else {
+            let Some(code) = keymap::win_from_hid(hid) else {
+                return;
+            };
+            let ext = if code & 0xE000 == 0xE000 {
+                KEYEVENTF_EXTENDEDKEY
+            } else {
+                KEYBD_EVENT_FLAGS(0)
+            };
             KEYBDINPUT {
                 wVk: VIRTUAL_KEY(0),
                 wScan: code & 0xFF,
@@ -302,6 +457,9 @@ impl Backend for Platform {
                 dwExtraInfo: MAGIC,
             }
         };
-        send(&[INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki } }]);
+        send(&[INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 { ki },
+        }]);
     }
 }

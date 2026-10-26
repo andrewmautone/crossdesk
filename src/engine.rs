@@ -1,4 +1,4 @@
-﻿//! Decides where local input goes: to this machine, or to the machine the
+//! Decides where local input goes: to this machine, or to the machine the
 //! virtual cursor is on. Called synchronously from the OS input hooks, so
 //! every path here must be fast and never block on the network.
 
@@ -10,6 +10,7 @@ use crate::net::Registry;
 use crate::protocol::{Button, Msg};
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 struct Remote {
@@ -19,6 +20,26 @@ struct Remote {
     /// Where the local cursor was when it left; used if control returns abruptly.
     return_pt: (i32, i32),
 }
+
+/// The local cursor is resting on an edge that leads to another machine.
+#[derive(Clone, Debug)]
+struct EdgeHit {
+    dir: Dir,
+    monitor: usize,
+    entry: (f64, f64),
+    pt: (i32, i32),
+}
+
+/// How hard the user has pushed against an edge so far.
+#[derive(Clone, Copy, Debug)]
+struct Push {
+    dir: Dir,
+    amount: f64,
+    last: Instant,
+}
+
+/// A pause this long while pushing starts the count over.
+const PUSH_RESET: Duration = Duration::from_millis(450);
 
 pub struct Engine {
     local_id: String,
@@ -31,13 +52,27 @@ pub struct Engine {
     local_buttons: HashSet<Button>,
     remote_buttons: HashSet<Button>,
     held_keys: HashSet<u16>,
+    edge: Option<EdgeHit>,
+    push: Option<Push>,
+}
+
+fn on_same_edge(e: &EdgeHit, pt: (i32, i32)) -> bool {
+    match e.dir {
+        Dir::Right | Dir::Left => pt.0 == e.pt.0,
+        Dir::Up | Dir::Down => pt.1 == e.pt.1,
+    }
 }
 
 const HOTKEY_RETURN: u16 = 0x14; // Q
 const HOTKEY_LOCK: u16 = 0x0F; // L
 
 impl Engine {
-    pub fn new(local_id: String, settings: Settings, registry: Arc<Registry>, clipboard: Clipboard) -> Engine {
+    pub fn new(
+        local_id: String,
+        settings: Settings,
+        registry: Arc<Registry>,
+        clipboard: Clipboard,
+    ) -> Engine {
         Engine {
             local_id,
             world: World::default(),
@@ -49,6 +84,8 @@ impl Engine {
             local_buttons: HashSet::new(),
             remote_buttons: HashSet::new(),
             held_keys: HashSet::new(),
+            edge: None,
+            push: None,
         }
     }
 
@@ -58,7 +95,10 @@ impl Engine {
         let r = self.remote.as_ref()?;
         // Monitor indexes change with the world; re-find the cursor or give control back.
         let world = &self.world;
-        match world.find(r.pos).filter(|&i| world.monitors[i].machine == r.target) {
+        match world
+            .find(r.pos)
+            .filter(|&i| world.monitors[i].machine == r.target)
+        {
             Some(i) => {
                 self.remote.as_mut().unwrap().monitor = i;
                 None
@@ -84,7 +124,11 @@ impl Engine {
     }
 
     fn local_scale(&self) -> f64 {
-        self.world.monitors.iter().find(|m| m.machine == self.local_id).map_or(1.0, |m| m.scale)
+        self.world
+            .monitors
+            .iter()
+            .find(|m| m.machine == self.local_id)
+            .map_or(1.0, |m| m.scale)
     }
 
     pub fn on_move(&mut self, pt: (i32, i32), delta: Option<(f64, f64)>) -> Decision {
@@ -94,7 +138,93 @@ impl Engine {
         }
     }
 
+    fn resistance(&self) -> f64 {
+        self.settings.edge_resistance.max(0) as f64
+    }
+
+    /// Add `outward` pixels of push toward `dir`; true once it beats the resistance.
+    fn pushed_through(&mut self, dir: Dir, outward: f64) -> bool {
+        let needed = self.resistance();
+        if needed <= 0.0 {
+            return true;
+        }
+        let now = Instant::now();
+        let p = self.push.get_or_insert(Push {
+            dir,
+            amount: 0.0,
+            last: now,
+        });
+        if p.dir != dir || now.duration_since(p.last) > PUSH_RESET {
+            *p = Push {
+                dir,
+                amount: 0.0,
+                last: now,
+            };
+        }
+        if outward > 0.0 {
+            p.amount += outward;
+            p.last = now;
+        } else {
+            p.amount = (p.amount + outward).max(0.0);
+        }
+        p.amount >= needed
+    }
+
+    fn enter_remote(&mut self, j: usize, entry: (f64, f64), pt: (i32, i32)) -> Decision {
+        let machine = self.world.monitors[j].machine.clone();
+        let (x, y) = self.world.monitors[j].to_native(entry);
+        self.registry.send(&machine, Msg::Enter { x, y });
+        if self.settings.clipboard_sync {
+            self.clipboard.send_to(&machine);
+        }
+        self.remote = Some(Remote {
+            target: machine,
+            monitor: j,
+            pos: entry,
+            return_pt: pt,
+        });
+        self.remote_buttons.clear();
+        self.edge = None;
+        self.push = None;
+        Decision {
+            block: true,
+            freeze_at: Some(pt),
+            release_to: None,
+        }
+    }
+
+    /// Raw mouse movement, reported even when the cursor is pinned against an edge
+    /// (Raw Input on Windows, event deltas on macOS). Only used to measure the push.
+    pub fn on_push_delta(&mut self, dx: f64, dy: f64) -> Decision {
+        if self.remote.is_some() {
+            return Decision::default();
+        }
+        let Some(hit) = self.edge.clone() else {
+            return Decision::default();
+        };
+        let outward = match hit.dir {
+            Dir::Right => dx,
+            Dir::Left => -dx,
+            Dir::Down => dy,
+            Dir::Up => -dy,
+        };
+        if outward == 0.0 || !self.pushed_through(hit.dir, outward) {
+            return Decision::default();
+        }
+        self.enter_remote(hit.monitor, hit.entry, hit.pt)
+    }
+
     fn local_move(&mut self, pt: (i32, i32)) -> Decision {
+        let d = self.local_edge(pt);
+        // Moving off the edge line forgets the push.
+        if self.edge.as_ref().is_some_and(|e| !on_same_edge(e, pt)) {
+            self.edge = None;
+            self.push = None;
+        }
+        d
+    }
+
+    fn local_edge(&mut self, pt: (i32, i32)) -> Decision {
         if !self.settings.edge_switch || self.locked || !self.local_buttons.is_empty() {
             return Decision::default();
         }
@@ -115,36 +245,64 @@ impl Engine {
             if !hit {
                 continue;
             }
-            let Some((j, entry)) = self.world.neighbor(idx, cpos, dir) else { continue };
+            let Some((j, entry)) = self.world.neighbor(idx, cpos, dir) else {
+                continue;
+            };
             let machine = self.world.monitors[j].machine.clone();
             if machine == self.local_id || !self.registry.is_connected(&machine) {
                 continue;
             }
-            let (x, y) = self.world.monitors[j].to_native(entry);
-            self.registry.send(&machine, Msg::Enter { x, y });
-            if self.settings.clipboard_sync {
-                self.clipboard.send_to(&machine);
+            if self.resistance() <= 0.0 {
+                return self.enter_remote(j, entry, pt);
             }
-            self.remote = Some(Remote { target: machine, monitor: j, pos: entry, return_pt: pt });
-            self.remote_buttons.clear();
-            return Decision { block: true, freeze_at: Some(pt), release_to: None };
+            // Resting on the edge: wait for enough push (see on_push_delta).
+            self.edge = Some(EdgeHit {
+                dir,
+                monitor: j,
+                entry,
+                pt,
+            });
+            return Decision::default();
         }
         Decision::default()
     }
 
     fn remote_move(&mut self, mut r: Remote, delta: (f64, f64)) -> Decision {
         let s = self.local_scale();
-        let (j, p) = self.world.step(r.monitor, r.pos, (delta.0 * s, delta.1 * s));
+        let d = (delta.0 * s, delta.1 * s);
+        let (j, p) = self.world.step(r.monitor, r.pos, d);
         let machine = self.world.monitors[j].machine.clone();
         // Never switch machines in the middle of a drag.
         let dragging = !self.remote_buttons.is_empty();
+        if machine != r.target {
+            // Leaving this machine also takes a push against the edge.
+            let c = self.world.monitors[r.monitor].rect;
+            let (dir, outward) = if p.0 >= c.right() {
+                (Dir::Right, d.0)
+            } else if p.0 < c.x {
+                (Dir::Left, -d.0)
+            } else if p.1 >= c.bottom() {
+                (Dir::Down, d.1)
+            } else {
+                (Dir::Up, -d.1)
+            };
+            if !dragging && !self.pushed_through(dir, outward) {
+                return self.stay_on_edge(r, delta);
+            }
+        } else {
+            self.push = None;
+        }
         if machine == self.local_id {
             if dragging {
                 return self.stay_on_edge(r, delta);
             }
             let to = self.world.monitors[j].to_native(p);
             self.return_local(to);
-            return Decision { block: true, freeze_at: None, release_to: Some(to) };
+            return Decision {
+                block: true,
+                freeze_at: None,
+                release_to: Some(to),
+            };
         }
         if machine != r.target {
             if dragging || !self.registry.is_connected(&machine) {
@@ -163,7 +321,10 @@ impl Engine {
         let (x, y) = self.world.monitors[j].to_native(p);
         self.registry.send(&r.target, Msg::MouseMove { x, y });
         self.remote = Some(r);
-        Decision { block: true, ..Decision::default() }
+        Decision {
+            block: true,
+            ..Decision::default()
+        }
     }
 
     fn stay_on_edge(&mut self, mut r: Remote, delta: (f64, f64)) -> Decision {
@@ -173,11 +334,16 @@ impl Engine {
         let (x, y) = self.world.monitors[r.monitor].to_native(r.pos);
         self.registry.send(&r.target, Msg::MouseMove { x, y });
         self.remote = Some(r);
-        Decision { block: true, ..Decision::default() }
+        Decision {
+            block: true,
+            ..Decision::default()
+        }
     }
 
     /// Give control back to this machine. The caller moves the real cursor to `pt`.
     fn return_local(&mut self, _pt: (i32, i32)) {
+        self.push = None;
+        self.edge = None;
         if let Some(r) = self.remote.take() {
             // The receiver releases its held keys and replies with its clipboard.
             self.registry.send(&r.target, Msg::Leave);
@@ -217,7 +383,8 @@ impl Engine {
                 } else {
                     self.remote_buttons.remove(&b);
                 }
-                self.registry.send(&r.target, Msg::MouseButton { button: b, down });
+                self.registry
+                    .send(&r.target, Msg::MouseButton { button: b, down });
                 true
             }
         }
@@ -249,16 +416,26 @@ impl Engine {
             }
             if down && hid == HOTKEY_RETURN {
                 if let Some(pt) = self.force_local() {
-                    return Decision { block: true, freeze_at: None, release_to: Some(pt) };
+                    return Decision {
+                        block: true,
+                        freeze_at: None,
+                        release_to: Some(pt),
+                    };
                 }
             }
-            return Decision { block: true, ..Decision::default() };
+            return Decision {
+                block: true,
+                ..Decision::default()
+            };
         }
         match &self.remote {
             None => Decision::default(),
             Some(r) => {
                 self.registry.send(&r.target, Msg::Key { hid, down });
-                Decision { block: true, ..Decision::default() }
+                Decision {
+                    block: true,
+                    ..Decision::default()
+                }
             }
         }
     }
@@ -273,14 +450,49 @@ mod tests {
     fn setup() -> (Engine, mpsc::UnboundedReceiver<Msg>) {
         let registry = Arc::new(Registry::default());
         let (tx, rx) = mpsc::unbounded_channel();
-        registry.register("mac", true, tx, Default::default()).unwrap();
-        let settings = Settings { clipboard_sync: false, ..Settings::default() };
-        let mut e = Engine::new("pc".into(), settings, registry.clone(), Clipboard::start(registry));
-        let mon = |w, h| Monitor { x: 0, y: 0, w, h, primary: true, name: String::new() };
-        let machines = vec![("pc".to_string(), vec![mon(1920, 1080)]), ("mac".to_string(), vec![mon(1440, 900)])];
+        registry
+            .register("mac", true, tx, Default::default())
+            .unwrap();
+        let settings = Settings {
+            clipboard_sync: false,
+            edge_resistance: 0,
+            ..Settings::default()
+        };
+        let mut e = Engine::new(
+            "pc".into(),
+            settings,
+            registry.clone(),
+            Clipboard::start(registry),
+        );
+        let mon = |w, h| Monitor {
+            x: 0,
+            y: 0,
+            w,
+            h,
+            primary: true,
+            name: String::new(),
+        };
+        let machines = vec![
+            ("pc".to_string(), vec![mon(1920, 1080)]),
+            ("mac".to_string(), vec![mon(1440, 900)]),
+        ];
         let mut layout = Layout::default();
-        layout.placements.insert("pc".into(), Placement { x: 0.0, y: 0.0, scale: 1.0 });
-        layout.placements.insert("mac".into(), Placement { x: 1920.0, y: 0.0, scale: 1.2 });
+        layout.placements.insert(
+            "pc".into(),
+            Placement {
+                x: 0.0,
+                y: 0.0,
+                scale: 1.0,
+            },
+        );
+        layout.placements.insert(
+            "mac".into(),
+            Placement {
+                x: 1920.0,
+                y: 0.0,
+                scale: 1.2,
+            },
+        );
         e.set_world(World::build(&machines, &layout));
         (e, rx)
     }
@@ -304,7 +516,10 @@ mod tests {
         assert!(e.on_button(Button::Left, false));
         e.on_move((0, 0), Some((120.0, 0.0)));
         let msgs = drain(&mut rx);
-        assert!(matches!(msgs.last(), Some(Msg::MouseMove { x: 100, y: 500 })), "{msgs:?}");
+        assert!(
+            matches!(msgs.last(), Some(Msg::MouseMove { x: 100, y: 500 })),
+            "{msgs:?}"
+        );
 
         // Moving back past the Mac's left edge returns to the PC.
         let d = e.on_move((0, 0), Some((-500.0, 0.0)));
@@ -332,9 +547,59 @@ mod tests {
     #[test]
     fn corners_are_ignored() {
         let (mut e, _rx) = setup();
-        e.set_settings(Settings { corner_px: 40, clipboard_sync: false, ..Settings::default() });
+        e.set_settings(Settings {
+            corner_px: 40,
+            clipboard_sync: false,
+            edge_resistance: 0,
+            ..Settings::default()
+        });
         assert!(!e.on_move((1919, 10), None).block);
         assert!(e.on_move((1919, 500), None).block);
+    }
+
+    #[test]
+    fn crossing_needs_a_push_when_resistance_is_set() {
+        let (mut e, mut rx) = setup();
+        e.set_settings(Settings {
+            clipboard_sync: false,
+            edge_resistance: 100,
+            ..Settings::default()
+        });
+        // Touching the edge alone does not cross.
+        assert!(!e.on_move((1919, 600), None).block);
+        assert_eq!(e.active_target(), None);
+        // Pushing along the edge or back inward does not count.
+        assert!(!e.on_push_delta(0.0, 50.0).block);
+        assert!(!e.on_push_delta(-30.0, 0.0).block);
+        assert!(!e.on_push_delta(60.0, 0.0).block);
+        let d = e.on_push_delta(45.0, 0.0);
+        assert!(d.block && d.freeze_at == Some((1919, 600)));
+        assert_eq!(e.active_target(), Some("mac"));
+        assert!(matches!(drain(&mut rx).first(), Some(Msg::Enter { .. })));
+
+        // Coming back also needs the push: one small nudge stays on the Mac.
+        let d = e.on_move((0, 0), Some((-50.0, 0.0)));
+        assert!(d.release_to.is_none());
+        assert_eq!(e.active_target(), Some("mac"));
+        let d = e.on_move((0, 0), Some((-60.0, 0.0)));
+        assert!(d.release_to.is_some());
+        assert_eq!(e.active_target(), None);
+    }
+
+    #[test]
+    fn leaving_the_edge_resets_the_push() {
+        let (mut e, _rx) = setup();
+        e.set_settings(Settings {
+            clipboard_sync: false,
+            edge_resistance: 100,
+            ..Settings::default()
+        });
+        e.on_move((1919, 600), None);
+        e.on_push_delta(90.0, 0.0);
+        e.on_move((1800, 600), None);
+        e.on_move((1919, 600), None);
+        assert!(!e.on_push_delta(20.0, 0.0).block);
+        assert_eq!(e.active_target(), None);
     }
 
     #[test]
