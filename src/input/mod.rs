@@ -26,6 +26,14 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore]
+    fn print_monitors() {
+        for m in monitors() {
+            eprintln!("{m:?} physical={:?}", m.physical_mm());
+        }
+    }
+
+    #[test]
     fn parks_off_the_taskbar_and_dock() {
         let m = vec![Monitor {
             x: 0,

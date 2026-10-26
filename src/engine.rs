@@ -125,24 +125,34 @@ impl Engine {
         self.locked
     }
 
-    /// Height on the canvas of a machine's main screen.
-    fn main_height(&self, machine: &str) -> Option<f64> {
+    /// A machine's main screen on the canvas.
+    fn main_monitor(&self, machine: &str) -> Option<&crate::layout::WorldMonitor> {
         let mons = self.world.monitors.iter().filter(|m| m.machine == machine);
-        let main = mons
-            .clone()
+        mons.clone()
             .find(|m| m.native.primary)
-            .or_else(|| mons.max_by(|a, b| a.rect.h.total_cmp(&b.rect.h)));
-        main.map(|m| m.rect.h)
+            .or_else(|| mons.max_by(|a, b| a.rect.h.total_cmp(&b.rect.h)))
     }
 
     /// Canvas units per local pixel of movement while controlling `target`.
     fn move_scale(&self, target: &str) -> f64 {
-        let mut s = self.local_scale();
+        let local_scale = self.local_scale();
+        let mut s = local_scale;
         if self.settings.auto_speed {
-            if let (Some(theirs), Some(ours)) =
-                (self.main_height(target), self.main_height(&self.local_id))
+            if let (Some(ours), Some(theirs)) =
+                (self.main_monitor(&self.local_id), self.main_monitor(target))
             {
-                s *= (theirs / ours.max(1.0) / self.local_scale()).clamp(0.05, 20.0);
+                s = match (ours.native.physical_mm(), theirs.native.physical_mm()) {
+                    // Same physical speed: a hand movement that moves the cursor 1 cm
+                    // on this screen moves it 1 cm on theirs.
+                    (Some((_, our_mm)), Some((_, their_mm))) => {
+                        let ours_mm_per_px = our_mm / ours.native.h.max(1) as f64;
+                        let theirs_mm_per_unit = their_mm / theirs.native.h.max(1) as f64;
+                        theirs.scale * ours_mm_per_px / theirs_mm_per_unit
+                    }
+                    // Unknown sizes: crossing their main screen takes the same movement as ours.
+                    _ => local_scale * theirs.rect.h / ours.rect.h.max(1.0),
+                }
+                .clamp(local_scale * 0.05, local_scale * 20.0);
             }
         }
         let user = self
@@ -742,6 +752,101 @@ mod tests {
         // Entered at Mac y 167 (100 px on the PC / 0.6); +90, then +180 at 2x.
         assert!((y1 - 257).abs() <= 1, "y1={y1}");
         assert!((y2 - y1 - 180).abs() <= 1, "y1={y1} y2={y2}");
+    }
+
+    #[test]
+    fn auto_speed_ignores_the_map_scale_of_this_computer() {
+        let (mut e, mut rx) = setup();
+        // The Mac placed the layout: PC drawn at 0.45, Mac at 1.
+        let mon = |w, h| Monitor {
+            x: 0,
+            y: 0,
+            w,
+            h,
+            primary: true,
+            name: String::new(),
+        };
+        let machines = vec![
+            ("pc".to_string(), vec![mon(3840, 2160)]),
+            ("mac".to_string(), vec![mon(1512, 982)]),
+        ];
+        let mut layout = Layout::default();
+        layout.placements.insert(
+            "pc".into(),
+            Placement {
+                x: 0.0,
+                y: 0.0,
+                scale: 0.4546,
+            },
+        );
+        layout.placements.insert(
+            "mac".into(),
+            Placement {
+                x: 1745.7,
+                y: 0.0,
+                scale: 1.0,
+            },
+        );
+        e.set_world(World::build(&machines, &layout));
+        e.on_move((3839, 100), None);
+        drain(&mut rx);
+        // A tenth of the PC screen (216 px) moves a tenth of the Mac screen (~98 pt).
+        e.on_move((0, 0), Some((0.0, 216.0)));
+        let Some(Msg::MouseMove { y, .. }) = drain(&mut rx).pop() else {
+            panic!()
+        };
+        assert!((y - (45 + 98)).abs() <= 2, "y={y}");
+    }
+
+    #[test]
+    fn auto_speed_matches_physical_size_when_known() {
+        let (mut e, mut rx) = setup();
+        // 27" 4K (336 mm tall) and a 14" laptop (196 mm tall, 982 pt).
+        let pc = Monitor {
+            x: 0,
+            y: 0,
+            w: 3840,
+            h: 2160,
+            primary: true,
+            name: String::new(),
+        }
+        .with_physical_mm(597.0, 336.0);
+        let mac = Monitor {
+            x: 0,
+            y: 0,
+            w: 1512,
+            h: 982,
+            primary: true,
+            name: String::new(),
+        }
+        .with_physical_mm(302.0, 196.0);
+        let machines = vec![("pc".to_string(), vec![pc]), ("mac".to_string(), vec![mac])];
+        let mut layout = Layout::default();
+        layout.placements.insert(
+            "pc".into(),
+            Placement {
+                x: 0.0,
+                y: 0.0,
+                scale: 1.0,
+            },
+        );
+        layout.placements.insert(
+            "mac".into(),
+            Placement {
+                x: 3840.0,
+                y: 0.0,
+                scale: 2.2,
+            },
+        );
+        e.set_world(World::build(&machines, &layout));
+        e.on_move((3839, 100), None);
+        drain(&mut rx);
+        // 216 px on the PC = 33.6 mm, which is 168 pt on the Mac (5.01 pt/mm).
+        e.on_move((0, 0), Some((0.0, 216.0)));
+        let Some(Msg::MouseMove { y, .. }) = drain(&mut rx).pop() else {
+            panic!()
+        };
+        assert!((y - (45 + 168)).abs() <= 2, "y={y}");
     }
 
     #[test]

@@ -410,16 +410,78 @@ unsafe extern "system" fn monitor_proc(hmon: HMONITOR, _: HDC, _: *mut RECT, dat
         let name = String::from_utf16_lossy(&info.szDevice[..len])
             .trim_start_matches("\\\\.\\")
             .to_string();
-        out.push(Monitor {
+        let mm = physical_mm(&info.szDevice);
+        let m = Monitor {
             x: r.left,
             y: r.top,
             w: r.right - r.left,
             h: r.bottom - r.top,
             primary: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY != 0,
             name,
+        };
+        out.push(match mm {
+            Some((w, h)) => m.with_physical_mm(w, h),
+            None => m,
         });
     }
     BOOL(1)
+}
+
+/// Physical size of the monitor on adapter output `device` (e.g. \\.\DISPLAY1),
+/// read from its EDID in the registry.
+fn physical_mm(device: &[u16; 32]) -> Option<(f64, f64)> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW};
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_BINARY};
+    unsafe {
+        let mut dd = DISPLAY_DEVICEW {
+            cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+            ..Default::default()
+        };
+        // EDD_GET_DEVICE_INTERFACE_NAME: DeviceID becomes \\?\DISPLAY#<model>#<instance>#{guid}
+        if !EnumDisplayDevicesW(PCWSTR(device.as_ptr()), 0, &mut dd, 1).as_bool() {
+            return None;
+        }
+        let len = dd
+            .DeviceID
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(dd.DeviceID.len());
+        let id = String::from_utf16_lossy(&dd.DeviceID[..len]);
+        let mut parts = id.trim_start_matches("\\\\?\\").split('#');
+        let (_, model, instance) = (parts.next()?, parts.next()?, parts.next()?);
+        let key: Vec<u16> = format!(
+            "SYSTEM\\CurrentControlSet\\Enum\\DISPLAY\\{model}\\{instance}\\Device Parameters"
+        )
+        .encode_utf16()
+        .chain([0])
+        .collect();
+        let value: Vec<u16> = "EDID".encode_utf16().chain([0]).collect();
+        let mut edid = [0u8; 256];
+        let mut size = edid.len() as u32;
+        let err = RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(key.as_ptr()),
+            PCWSTR(value.as_ptr()),
+            RRF_RT_REG_BINARY,
+            None,
+            Some(edid.as_mut_ptr().cast()),
+            Some(&mut size),
+        );
+        if err.is_err() || size < 128 {
+            return None;
+        }
+        // First detailed timing descriptor has the size in mm; bytes 21-22 are whole cm.
+        let w = edid[66] as u32 | ((edid[68] as u32 & 0xF0) << 4);
+        let h = edid[67] as u32 | ((edid[68] as u32 & 0x0F) << 8);
+        if w > 0 && h > 0 {
+            Some((w as f64, h as f64))
+        } else if edid[21] > 0 && edid[22] > 0 {
+            Some((edid[21] as f64 * 10.0, edid[22] as f64 * 10.0))
+        } else {
+            None
+        }
+    }
 }
 
 impl Backend for Platform {

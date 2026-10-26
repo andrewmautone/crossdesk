@@ -434,6 +434,12 @@ impl Shared {
                 }
             }
             Msg::Enter { x, y } => {
+                // Someone else's mouse is here now: stop driving another machine ourselves,
+                // which also brings our hidden cursor back.
+                let was_driving = self.engine.lock().force_local();
+                if was_driving.is_some() {
+                    input::warp(x, y);
+                }
                 *self.controlled_by.lock() = Some(peer.to_string());
                 *self.remote_cursor.lock() = Some((x, y));
                 self.injector.lock().move_abs(x, y);

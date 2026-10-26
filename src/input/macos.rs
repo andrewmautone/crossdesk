@@ -385,7 +385,9 @@ impl Backend for Platform {
         let mut out: Vec<Monitor> = ids
             .into_iter()
             .map(|id| {
-                let b = CGDisplay::new(id).bounds();
+                let display = CGDisplay::new(id);
+                let b = display.bounds();
+                let mm = display.screen_size();
                 Monitor {
                     x: b.origin.x.round() as i32,
                     y: b.origin.y.round() as i32,
@@ -394,6 +396,7 @@ impl Backend for Platform {
                     primary: id == main,
                     name: format!("Display {id}"),
                 }
+                .with_physical_mm(mm.width, mm.height)
             })
             .collect();
         out.sort_by_key(|m| (m.x, m.y));

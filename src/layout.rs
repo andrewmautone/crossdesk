@@ -17,6 +17,30 @@ pub struct Monitor {
     pub name: String,
 }
 
+impl Monitor {
+    /// Append the physical size to the name. It travels inside `name` so older
+    /// builds, which only display the name, keep understanding the message.
+    pub fn with_physical_mm(mut self, w_mm: f64, h_mm: f64) -> Monitor {
+        if w_mm >= 50.0 && h_mm >= 30.0 {
+            // EDID reports the panel's native orientation; follow the current one.
+            let (w_mm, h_mm) = if (self.w > self.h) == (w_mm > h_mm) {
+                (w_mm, h_mm)
+            } else {
+                (h_mm, w_mm)
+            };
+            self.name = format!("{}|mm={:.0}x{:.0}", self.name, w_mm, h_mm);
+        }
+        self
+    }
+
+    /// Physical size in millimetres, when the OS reported one.
+    pub fn physical_mm(&self) -> Option<(f64, f64)> {
+        let (_, size) = self.name.rsplit_once("|mm=")?;
+        let (w, h) = size.split_once('x')?;
+        Some((w.parse().ok()?, h.parse().ok()?))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Placement {
     pub x: f64,
