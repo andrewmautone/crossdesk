@@ -1,0 +1,33 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+          - os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+      - name: Build Windows
+        if: runner.os == 'Windows'
+        run: cargo build --release
+      - name: Build macOS app
+        if: runner.os == 'macOS'
+        run: |
+          sh scripts/build-macos.sh
+          cd target && zip -r Crossdesk-macos.zip Crossdesk.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crossdesk-${{ runner.os }}
+          path: |
+            target/release/crossdesk.exe
+            target/Crossdesk-macos.zip
+          if-no-files-found: ignore
