@@ -99,6 +99,13 @@ cargo check --target aarch64-apple-darwin   # type-check the macOS code from Win
 | `src/input/macos.rs` | Quartz event tap and CGEventPost |
 | `src/input/keymap.rs` | HID ⇄ Windows scancode ⇄ macOS keycode |
 | `src/ui.rs` | egui window |
+| `src/tray.rs` | Tray / menu bar icon and menu |
+| `src/updater.rs` | Self-update from GitHub Releases |
+
+The icons come from `assets/icon.svg` (large sizes, macOS), `assets/icon-small.svg`
+(16-32 px) and `assets/tray.svg` (menu bar / tray). After editing them, run
+`python scripts/make-icons.py` (needs `cargo install resvg` and Pillow) to rewrite
+`assets/generated/`.
 
 Settings live in `%APPDATA%\crossdesk\Crossdesk\config\config.json` on Windows and in
 `~/Library/Application Support/com.crossdesk.Crossdesk/config.json` on macOS.

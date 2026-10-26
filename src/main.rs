@@ -9,8 +9,22 @@ mod layout;
 mod net;
 mod protocol;
 mod state;
+#[cfg(any(windows, target_os = "macos"))]
+mod tray;
 mod ui;
 mod updater;
+
+use std::sync::Arc;
+
+#[cfg(any(windows, target_os = "macos"))]
+fn app_icon() -> eframe::egui::IconData {
+    tray::window_icon()
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn app_icon() -> eframe::egui::IconData {
+    eframe::egui::IconData::default()
+}
 
 fn main() -> eframe::Result<()> {
     input::init_process();
@@ -31,11 +45,14 @@ fn main() -> eframe::Result<()> {
     }
     let _ = shared.updater.set(updater);
 
+    let start_hidden = cfg!(any(windows, target_os = "macos")) && shared.config.lock().settings.start_hidden;
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("crossdesk")
             .with_inner_size([980.0, 620.0])
-            .with_min_inner_size([760.0, 480.0]),
+            .with_min_inner_size([760.0, 480.0])
+            .with_visible(!start_hidden)
+            .with_icon(Arc::new(app_icon())),
         ..Default::default()
     };
     let app_shared = shared.clone();

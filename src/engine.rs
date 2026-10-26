@@ -75,6 +75,10 @@ impl Engine {
         self.remote.as_ref().map(|r| r.target.as_str())
     }
 
+    pub fn set_locked(&mut self, locked: bool) {
+        self.locked = locked;
+    }
+
     pub fn is_locked(&self) -> bool {
         self.locked
     }

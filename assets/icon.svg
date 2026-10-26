@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- crossdesk app icon: two screens side by side, the cursor crossing between them. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5B4BF0"/>
+      <stop offset="1" stop-color="#0EA5C6"/>
+    </linearGradient>
+    <linearGradient id="screenA" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#EEF2FF"/>
+      <stop offset="1" stop-color="#C7D2FE"/>
+    </linearGradient>
+    <linearGradient id="screenB" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ECFEFF"/>
+      <stop offset="1" stop-color="#A5F3FC"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#0B1440" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- macOS-style rounded square on the standard 1024 grid (824 px body). -->
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)"/>
+  <rect x="100" y="100" width="824" height="412" rx="186" fill="#FFFFFF" opacity="0.06"/>
+
+  <g filter="url(#shadow)">
+    <!-- left screen -->
+    <rect x="176" y="318" width="318" height="226" rx="30" fill="#FFFFFF"/>
+    <rect x="198" y="340" width="274" height="182" rx="14" fill="url(#screenA)"/>
+    <rect x="309" y="544" width="52" height="64" fill="#FFFFFF"/>
+    <rect x="262" y="600" width="146" height="30" rx="15" fill="#FFFFFF"/>
+
+    <!-- right screen -->
+    <rect x="530" y="318" width="318" height="226" rx="30" fill="#FFFFFF"/>
+    <rect x="552" y="340" width="274" height="182" rx="14" fill="url(#screenB)"/>
+    <rect x="663" y="544" width="52" height="64" fill="#FFFFFF"/>
+    <rect x="616" y="600" width="146" height="30" rx="15" fill="#FFFFFF"/>
+  </g>
+
+  <!-- the path the cursor took -->
+  <path d="M 268 470 Q 380 380 520 404" fill="none" stroke="#5B4BF0" stroke-width="16"
+        stroke-linecap="round" stroke-dasharray="0.1 34" opacity="0.85"/>
+
+  <!-- cursor, tip on the seam between the two screens -->
+  <g transform="translate(512 380) scale(1.45)" filter="url(#shadow)">
+    <path d="M 0 0 L 0 118 L 30 90 L 52 140 L 75 130 L 53 81 L 94 81 Z"
+          fill="#1E1B4B" stroke="#FFFFFF" stroke-width="11" stroke-linejoin="round"/>
+  </g>
+</svg>

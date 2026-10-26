@@ -52,13 +52,15 @@ pub struct Updater {
 
 impl Updater {
     pub fn start(shared: Arc<Shared>) -> Updater {
-        cleanup_previous();
         let (tx, rx) = channel::<bool>();
         std::thread::Builder::new()
             .name("updater".into())
             .spawn(move || {
+                // The previous copy may still be exiting right after an update.
+                std::thread::sleep(Duration::from_secs(3));
+                cleanup_previous();
                 // Give the network a moment before the first automatic check.
-                let mut wait = Duration::from_secs(20);
+                let mut wait = Duration::from_secs(17);
                 loop {
                     let manual = match rx.recv_timeout(wait) {
                         Ok(manual) => manual,

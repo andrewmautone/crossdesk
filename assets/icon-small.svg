@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- Simplified app icon for 16-32 px: bigger screens, no trail, full bleed. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5B4BF0"/>
+      <stop offset="1" stop-color="#0EA5C6"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="64" height="64" rx="14" fill="url(#bg)"/>
+  <rect x="4" y="15" width="27" height="21" rx="3.5" fill="#FFFFFF"/>
+  <rect x="7" y="18" width="21" height="15" rx="1.5" fill="#C7D2FE"/>
+  <rect x="33" y="15" width="27" height="21" rx="3.5" fill="#FFFFFF"/>
+  <rect x="36" y="18" width="21" height="15" rx="1.5" fill="#A5F3FC"/>
+  <rect x="13" y="36" width="9" height="9" fill="#FFFFFF"/>
+  <rect x="9" y="43" width="17" height="5" rx="2.5" fill="#FFFFFF"/>
+  <rect x="42" y="36" width="9" height="9" fill="#FFFFFF"/>
+  <rect x="38" y="43" width="17" height="5" rx="2.5" fill="#FFFFFF"/>
+  <path d="M 31 20 L 31 48 L 38 41.5 L 43 53 L 48.5 50.5 L 43.5 39.5 L 53 39.5 Z"
+        fill="#1E1B4B" stroke="#FFFFFF" stroke-width="3.2" stroke-linejoin="round"/>
+</svg>

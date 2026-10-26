@@ -41,13 +41,32 @@ pub struct App {
     manual_addr: String,
     code_input: String,
     drag: Option<Drag>,
+    #[cfg(any(windows, target_os = "macos"))]
+    tray: Option<crate::tray::Tray>,
 }
 
 impl App {
     pub fn new(shared: Arc<Shared>, cc: &eframe::CreationContext) -> App {
         *shared.repaint.lock() = Some(cc.egui_ctx.clone());
         let name = shared.config.lock().name.clone();
-        App { shared, tab: Tab::Layout, name, manual_addr: String::new(), code_input: String::new(), drag: None }
+        #[cfg(any(windows, target_os = "macos"))]
+        let tray = match crate::tray::Tray::create(shared.clone(), cc.egui_ctx.clone()) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                shared.log(format!("no tray icon: {e}"));
+                None
+            }
+        };
+        App {
+            shared,
+            tab: Tab::Layout,
+            name,
+            manual_addr: String::new(),
+            code_input: String::new(),
+            drag: None,
+            #[cfg(any(windows, target_os = "macos"))]
+            tray,
+        }
     }
 }
 
@@ -86,6 +105,7 @@ fn parse_addr(text: &str) -> Option<SocketAddr> {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(700));
+        self.handle_close(ctx);
         self.top_bar(ctx);
         self.machines_panel(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -110,6 +130,22 @@ impl eframe::App for App {
 }
 
 impl App {
+    #[cfg(any(windows, target_os = "macos"))]
+    fn handle_close(&mut self, ctx: &egui::Context) {
+        if let Some(t) = &self.tray {
+            t.sync(self.shared.engine.lock().is_locked());
+        }
+        let quitting = crate::tray::QUITTING.load(std::sync::atomic::Ordering::SeqCst);
+        let to_tray = self.tray.is_some() && self.shared.config.lock().settings.close_to_tray;
+        if ctx.input(|i| i.viewport().close_requested()) && to_tray && !quitting {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    fn handle_close(&mut self, _ctx: &egui::Context) {}
+
     fn top_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(4.0);
@@ -396,6 +432,11 @@ impl App {
         ui.checkbox(&mut s.swap_ctrl_cmd, "Swap Ctrl and Cmd/Win when the other computer runs a different system")
             .on_hover_text("With this on, Ctrl+C on the PC keyboard does Cmd+C on the Mac.");
         ui.checkbox(&mut s.invert_scroll, "Invert scroll direction when controlled from another computer");
+        if cfg!(any(windows, target_os = "macos")) {
+            let place = if cfg!(target_os = "macos") { "menu bar" } else { "tray" };
+            ui.checkbox(&mut s.close_to_tray, format!("Closing the window keeps crossdesk running in the {place}"));
+            ui.checkbox(&mut s.start_hidden, format!("Start in the {place} without opening the window"));
+        }
         if cfg!(target_os = "macos") {
             ui.horizontal(|ui| {
                 ui.label("Lines per wheel notch:");
