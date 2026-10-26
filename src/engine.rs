@@ -125,6 +125,36 @@ impl Engine {
         self.locked
     }
 
+    /// Height on the canvas of a machine's main screen.
+    fn main_height(&self, machine: &str) -> Option<f64> {
+        let mons = self.world.monitors.iter().filter(|m| m.machine == machine);
+        let main = mons
+            .clone()
+            .find(|m| m.native.primary)
+            .or_else(|| mons.max_by(|a, b| a.rect.h.total_cmp(&b.rect.h)));
+        main.map(|m| m.rect.h)
+    }
+
+    /// Canvas units per local pixel of movement while controlling `target`.
+    fn move_scale(&self, target: &str) -> f64 {
+        let mut s = self.local_scale();
+        if self.settings.auto_speed {
+            if let (Some(theirs), Some(ours)) =
+                (self.main_height(target), self.main_height(&self.local_id))
+            {
+                s *= (theirs / ours.max(1.0) / self.local_scale()).clamp(0.05, 20.0);
+            }
+        }
+        let user = self
+            .settings
+            .speed
+            .get(target)
+            .copied()
+            .unwrap_or(1.0)
+            .clamp(0.1, 10.0);
+        s * user as f64
+    }
+
     fn local_scale(&self) -> f64 {
         self.world
             .monitors
@@ -307,7 +337,7 @@ impl Engine {
     }
 
     fn remote_move(&mut self, mut r: Remote, delta: (f64, f64)) -> Decision {
-        let s = self.local_scale();
+        let s = self.move_scale(&r.target);
         let d = (delta.0 * s, delta.1 * s);
         let (j, p) = self.world.step(r.monitor, r.pos, d);
         let machine = self.world.monitors[j].machine.clone();
@@ -367,7 +397,7 @@ impl Engine {
     }
 
     fn stay_on_edge(&mut self, mut r: Remote, delta: (f64, f64)) -> Decision {
-        let s = self.local_scale();
+        let s = self.move_scale(&r.target);
         let rect = self.world.monitors[r.monitor].rect;
         r.pos = rect.clamp((r.pos.0 + delta.0 * s, r.pos.1 + delta.1 * s));
         let (x, y) = self.world.monitors[r.monitor].to_native(r.pos);
@@ -655,6 +685,63 @@ mod tests {
         e.on_move((1919, 600), None);
         assert!(!e.on_push_delta(20.0, 0.0).block);
         assert_eq!(e.active_target(), None);
+    }
+
+    #[test]
+    fn auto_speed_matches_screen_sizes_and_user_speed_multiplies() {
+        let (mut e, mut rx) = setup();
+        // Make the Mac half as tall on the map: without auto speed it would feel twice as fast.
+        let mon = |w, h| Monitor {
+            x: 0,
+            y: 0,
+            w,
+            h,
+            primary: true,
+            name: String::new(),
+        };
+        let machines = vec![
+            ("pc".to_string(), vec![mon(1920, 1080)]),
+            ("mac".to_string(), vec![mon(1440, 900)]),
+        ];
+        let mut layout = Layout::default();
+        layout.placements.insert(
+            "pc".into(),
+            Placement {
+                x: 0.0,
+                y: 0.0,
+                scale: 1.0,
+            },
+        );
+        layout.placements.insert(
+            "mac".into(),
+            Placement {
+                x: 1920.0,
+                y: 0.0,
+                scale: 0.6,
+            },
+        );
+        e.set_world(World::build(&machines, &layout));
+        e.on_move((1919, 100), None);
+        drain(&mut rx);
+        // 108 px (a tenth of the PC screen) moves a tenth of the Mac screen (90 of 900).
+        e.on_move((0, 0), Some((0.0, 108.0)));
+        let Some(Msg::MouseMove { y: y1, .. }) = drain(&mut rx).pop() else {
+            panic!()
+        };
+        let mut s = Settings {
+            clipboard_sync: false,
+            edge_resistance: 0,
+            ..Settings::default()
+        };
+        s.speed.insert("mac".into(), 2.0);
+        e.set_settings(s);
+        e.on_move((0, 0), Some((0.0, 108.0)));
+        let Some(Msg::MouseMove { y: y2, .. }) = drain(&mut rx).pop() else {
+            panic!()
+        };
+        // Entered at Mac y 167 (100 px on the PC / 0.6); +90, then +180 at 2x.
+        assert!((y1 - 257).abs() <= 1, "y1={y1}");
+        assert!((y2 - y1 - 180).abs() <= 1, "y1={y1} y2={y2}");
     }
 
     #[test]

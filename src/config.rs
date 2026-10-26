@@ -25,6 +25,11 @@ pub struct Settings {
     pub edge_switch: bool,
     /// Pixels at each end of an edge where switching is ignored (corners stay usable).
     pub corner_px: i32,
+    /// Match cursor speed automatically: crossing another computer's main screen
+    /// takes the same hand movement as crossing this computer's.
+    pub auto_speed: bool,
+    /// Extra speed multiplier per machine id while controlling it.
+    pub speed: BTreeMap<String, f32>,
     /// How far (pixels) to keep pushing past an edge before the cursor crosses; 0 = at once.
     pub edge_resistance: i32,
     pub clipboard_sync: bool,
@@ -55,6 +60,8 @@ impl Default for Settings {
             edge_switch: true,
             corner_px: 0,
             edge_resistance: 120,
+            auto_speed: true,
+            speed: BTreeMap::new(),
             clipboard_sync: true,
             effects: true,
             distort: true,

@@ -543,11 +543,25 @@ mod tests {
     fn write_distort_preview() {
         let raw = std::fs::read(std::env::var("CROSSDESK_FX_SNAPSHOT").unwrap()).unwrap();
         let side = 340usize;
-        let snap = Snapshot { w: side, h: side, rgba: raw };
+        let snap = Snapshot {
+            w: side,
+            h: side,
+            rgba: raw,
+        };
         let frames: Vec<Frame> = [0.4, 1.0]
             .iter()
-            .map(|&p| Frame { time: p, burst: None, push: Some(p), dir: Dir::Right })
-            .chain([0.15, 0.35, 0.6].iter().map(|&t| Frame { time: t, burst: Some((t, Kind::Leave)), push: None, dir: Dir::Right }))
+            .map(|&p| Frame {
+                time: p,
+                burst: None,
+                push: Some(p),
+                dir: Dir::Right,
+            })
+            .chain([0.15, 0.35, 0.6].iter().map(|&t| Frame {
+                time: t,
+                burst: Some((t, Kind::Leave)),
+                push: None,
+                dir: Dir::Right,
+            }))
             .collect();
         let w = side * frames.len();
         let mut img = vec![0u8; w * side * 3];
@@ -559,14 +573,21 @@ mod tests {
                     let a = fx[s + 3] as f32 / 255.0;
                     let o = (y * w + i * side + x) * 3;
                     for ch in 0..3 {
-                        let under = if x < side / 2 { snap.rgba[s + ch] as f32 } else { 0.0 };
+                        let under = if x < side / 2 {
+                            snap.rgba[s + ch] as f32
+                        } else {
+                            0.0
+                        };
                         img[o + ch] = (fx[s + ch] as f32 + under * (1.0 - a)).min(255.0) as u8;
                     }
                 }
             }
         }
-        let mut data = format!("P6 {w} {side} 255
-").into_bytes();
+        let mut data = format!(
+            "P6 {w} {side} 255
+"
+        )
+        .into_bytes();
         data.extend_from_slice(&img);
         let out = std::env::temp_dir().join("crossdesk-distort.ppm");
         std::fs::write(&out, data).unwrap();

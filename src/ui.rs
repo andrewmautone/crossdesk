@@ -495,7 +495,7 @@ impl App {
                 ui.label(name);
                 changed |= ui
                     .add(egui::Slider::new(&mut p.scale, 0.25..=4.0).logarithmic(true).max_decimals(2))
-                    .on_hover_text("Makes this computer's screens bigger or smaller on the map. Also changes how fast the cursor crosses them.")
+                    .on_hover_text("Makes this computer's screens bigger or smaller on the map, to line the edges up.")
                     .changed();
                 ui.add_space(12.0);
             }
@@ -503,9 +503,42 @@ impl App {
                 self.shared.set_layout(layout);
             }
         });
+        self.speed_controls(ui, &machines, &names, &my_id);
         ui.label(
             RichText::new("Ctrl+Alt+Shift+Q brings the cursor back · Ctrl+Alt+Shift+L locks it to the current screen").weak().small(),
         );
+    }
+
+    fn speed_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        machines: &[(String, Vec<crate::layout::Monitor>)],
+        names: &std::collections::HashMap<String, String>,
+        my_id: &str,
+    ) {
+        let mut s: Settings = self.shared.config.lock().settings.clone();
+        let before = s.clone();
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut s.auto_speed, "Match cursor speed automatically").on_hover_text(
+                "Crossing the other computer's screen takes the same hand movement as crossing this one, whatever their resolution.",
+            );
+            for (id, _) in machines.iter().filter(|(id, _)| id != my_id) {
+                let name = names.get(id).cloned().unwrap_or_default();
+                let mut v = s.speed.get(id).copied().unwrap_or(1.0);
+                ui.add_space(12.0);
+                ui.label(format!("Speed on {name}:"));
+                if ui
+                    .add(egui::Slider::new(&mut v, 0.25..=4.0).logarithmic(true).max_decimals(2).suffix("×"))
+                    .on_hover_text("Faster or slower than automatic while your mouse is on that computer.")
+                    .changed()
+                {
+                    s.speed.insert(id.clone(), v);
+                }
+            }
+        });
+        if s != before {
+            self.shared.set_settings(s);
+        }
     }
 
     fn settings_tab(&mut self, ui: &mut egui::Ui) {
