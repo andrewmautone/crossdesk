@@ -28,6 +28,8 @@ const MAGIC: i64 = 0x4352_4F53;
 
 static TAP_PORT: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 static FROZEN: AtomicBool = AtomicBool::new(false);
+/// Where the local cursor waits while another machine has control.
+static FREEZE_PT: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 static CAPS_DOWN: Mutex<bool> = Mutex::new(false);
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -39,6 +41,7 @@ extern "C" {
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
+    fn CGSetLocalEventsSuppressionInterval(seconds: f64) -> i32;
 }
 
 /// Ask for the Accessibility permission (shows the system prompt once).
@@ -129,10 +132,11 @@ fn run_tap(shared: Arc<Shared>) -> Result<(), String> {
                 return Some(event.clone());
             }
             if handle(&s, etype, event) {
-                None
-            } else {
-                Some(event.clone())
+                // core-graphics 0.24 turns `None` back into the original event, so
+                // an event is swallowed by turning it into a Null event instead.
+                event.set_type(CGEventType::Null);
             }
+            Some(event.clone())
         },
     )
     .map_err(|_| "cannot create the event tap; check the Accessibility permission".to_string())?;
@@ -148,6 +152,8 @@ fn run_tap(shared: Arc<Shared>) -> Result<(), String> {
         CFRunLoop::get_current().add_source(&source, kCFRunLoopCommonModes);
     }
     tap.enable();
+    // Warping the cursor must not freeze the real mouse for a quarter second.
+    unsafe { CGSetLocalEventsSuppressionInterval(0.0) };
     *shared.capture_error.lock() = None;
     shared.repaint();
     CFRunLoop::run_current();
@@ -155,8 +161,11 @@ fn run_tap(shared: Arc<Shared>) -> Result<(), String> {
 }
 
 fn apply(d: Decision) -> bool {
-    if d.freeze_at.is_some() && !FROZEN.swap(true, Ordering::SeqCst) {
-        let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(false);
+    if let Some(pt) = d.freeze_at {
+        *FREEZE_PT.lock() = Some(pt);
+        if !FROZEN.swap(true, Ordering::SeqCst) {
+            let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(false);
+        }
     }
     if let Some(pt) = d.release_to {
         warp(pt.0, pt.1);
@@ -166,6 +175,7 @@ fn apply(d: Decision) -> bool {
 
 /// Put the cursor at `(x, y)` and give it back to the user.
 pub fn warp(x: i32, y: i32) {
+    *FREEZE_PT.lock() = None;
     let _ = CGDisplay::warp_mouse_cursor_position(CGPoint::new(x as f64 + 0.5, y as f64 + 0.5));
     if FROZEN.swap(false, Ordering::SeqCst) {
         let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(true);
@@ -209,7 +219,19 @@ fn handle(s: &Arc<Shared>, etype: CGEventType, event: &CGEvent) -> bool {
                 d = engine.on_push_delta(dx, dy);
             }
             drop(engine);
-            apply(d)
+            let block = apply(d);
+            // Belt and braces: if the cursor still drifted while frozen, put it back.
+            if FROZEN.load(Ordering::SeqCst) {
+                if let Some(f) = *FREEZE_PT.lock() {
+                    if (pt.0 - f.0).abs() > 1 || (pt.1 - f.1).abs() > 1 {
+                        let _ = CGDisplay::warp_mouse_cursor_position(CGPoint::new(
+                            f.0 as f64 + 0.5,
+                            f.1 as f64 + 0.5,
+                        ));
+                    }
+                }
+            }
+            block
         }
         LeftMouseDown => button(Button::Left, true),
         LeftMouseUp => button(Button::Left, false),
