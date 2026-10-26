@@ -10,6 +10,7 @@ mod net;
 mod protocol;
 mod state;
 mod ui;
+mod updater;
 
 fn main() -> eframe::Result<()> {
     input::init_process();
@@ -24,6 +25,7 @@ fn main() -> eframe::Result<()> {
     net::start(shared.clone());
     shared.watch_monitors();
     input::start_capture(shared.clone());
+    let _ = shared.updater.set(updater::Updater::start(shared.clone()));
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

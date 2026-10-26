@@ -31,6 +31,12 @@ pub struct Settings {
     /// Lines scrolled per wheel notch when this machine is controlled (macOS).
     pub scroll_lines: f32,
     pub invert_scroll: bool,
+    /// Install new builds from GitHub Releases automatically.
+    pub auto_update: bool,
+    /// GitHub "owner/repo" that publishes the releases.
+    pub update_repo: String,
+    /// Only needed when the repository is private.
+    pub github_token: String,
 }
 
 impl Default for Settings {
@@ -42,6 +48,9 @@ impl Default for Settings {
             swap_ctrl_cmd: true,
             scroll_lines: 3.0,
             invert_scroll: false,
+            auto_update: true,
+            update_repo: "andrewmautone/crossdesk".into(),
+            github_token: String::new(),
         }
     }
 }

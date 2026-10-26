@@ -51,7 +51,7 @@ pub enum Button {
 pub enum Msg {
     /// First encrypted message in each direction; proves both sides hold the key.
     Auth,
-    Info { name: String, os: String, monitors: Vec<Monitor> },
+    Info { name: String, os: String, build: u64, monitors: Vec<Monitor> },
     Layout(Layout),
     /// The sender now controls the receiver's cursor, starting at this native point.
     Enter { x: i32, y: i32 },

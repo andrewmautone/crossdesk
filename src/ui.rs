@@ -408,6 +408,37 @@ impl App {
         }
         ui.add_space(12.0);
         ui.separator();
+        ui.strong("Updates");
+        let build = crate::updater::build();
+        let mut s: Settings = self.shared.config.lock().settings.clone();
+        let before = s.clone();
+        ui.checkbox(&mut s.auto_update, "Install new versions automatically")
+            .on_hover_text("Checks GitHub every 30 minutes, and right away when another computer already runs a newer version.");
+        ui.horizontal(|ui| {
+            ui.label("GitHub repository:");
+            ui.add(egui::TextEdit::singleline(&mut s.update_repo).hint_text("owner/repo").desired_width(220.0));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Token (private repository only):");
+            ui.add(egui::TextEdit::singleline(&mut s.github_token).password(true).desired_width(220.0));
+        });
+        if s != before {
+            self.shared.set_settings(s);
+        }
+        ui.horizontal(|ui| {
+            ui.label(if build == 0 { "This is a local build (version 0).".to_string() } else { format!("Build {build}.") });
+            if ui.button("Check now").clicked() {
+                if let Some(u) = self.shared.updater.get() {
+                    u.check_now();
+                }
+            }
+            let status = self.shared.update_status.lock().clone();
+            if !status.is_empty() {
+                ui.label(RichText::new(status).weak());
+            }
+        });
+        ui.add_space(12.0);
+        ui.separator();
         ui.label(RichText::new(format!("Settings file: {}", crate::config::path().display())).weak().small());
     }
 

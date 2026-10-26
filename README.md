@@ -57,8 +57,30 @@ Open Crossdesk, then in **System Settings > Privacy & Security** turn it on unde
 **Accessibility** and **Input Monitoring**. It starts working as soon as you allow it.
 Also accept the *local network* prompt.
 
-You can also skip building on the Mac: push this repo to GitHub and the `build`
-workflow builds `Crossdesk-macos.zip` and `crossdesk.exe` as downloadable artifacts.
+## Updates
+
+Every push to `main` runs `.github/workflows/release.yml`. It tests and builds both
+apps (the Mac one is universal: Apple Silicon and Intel) and publishes the release
+`build-<N>` with `crossdesk-windows-x64.exe`, `Crossdesk-macos.zip` and a `.sha256`
+checksum for each.
+
+With **Settings > Install new versions automatically** on (the default), the app
+checks GitHub every 30 minutes, and right away when a connected computer reports a
+newer build. When it finds one, it waits until the mouse is back on its own
+computer, downloads the new version, checks the checksum, swaps it in place and
+restarts. Copies you build yourself are build 0 and only update when you click
+**Check now**.
+
+- **Private repository**: put a GitHub token with read access to *Contents* in
+  Settings on each computer.
+- **First install**: download from the Releases page. On the Mac, unzip, move
+  `Crossdesk.app` to `/Applications` and right-click > **Open** the first time,
+  because the app is not notarized. Updates after that need nothing.
+- **Mac permission across updates**: macOS ties the Accessibility permission to the
+  app's signature. CI signs with the same self-signed certificate every time when the
+  secrets `MACOS_CERT_P12` (base64 of the .p12) and `MACOS_CERT_PASSWORD` exist, so
+  the permission survives updates. Without them the app is signed ad hoc, and macOS
+  asks again after each update.
 
 ## Development
 

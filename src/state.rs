@@ -10,7 +10,7 @@ use crate::protocol::{this_os, Msg};
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::oneshot;
 
@@ -57,6 +57,8 @@ pub struct Shared {
     pub capture_error: Mutex<Option<String>>,
     pub log: Mutex<VecDeque<String>>,
     pub repaint: Mutex<Option<eframe::egui::Context>>,
+    pub updater: OnceLock<crate::updater::Updater>,
+    pub update_status: Mutex<String>,
 }
 
 fn now_ms() -> u64 {
@@ -89,9 +91,16 @@ impl Shared {
             capture_error: Mutex::new(None),
             log: Mutex::new(VecDeque::new()),
             repaint: Mutex::new(None),
+            updater: OnceLock::new(),
+            update_status: Mutex::new(String::new()),
         });
         shared.rebuild_world();
         shared
+    }
+
+    pub fn set_update_status(&self, status: String) {
+        *self.update_status.lock() = status;
+        self.repaint();
     }
 
     pub fn log(&self, msg: impl Into<String>) {
@@ -123,6 +132,7 @@ impl Shared {
         Msg::Info {
             name: self.config.lock().name.clone(),
             os: this_os().into(),
+            build: crate::updater::build(),
             monitors: self.local_monitors.lock().clone(),
         }
     }
@@ -329,7 +339,12 @@ impl Shared {
     pub fn handle_msg(&self, peer: &str, peer_os: &str, msg: Msg) {
         match msg {
             Msg::Auth => {}
-            Msg::Info { name, os, monitors } => {
+            Msg::Info { name, os, build, monitors } => {
+                if build > crate::updater::build() {
+                    if let Some(u) = self.updater.get() {
+                        u.peer_is_newer();
+                    }
+                }
                 if let Some(p) = self.peers.lock().get_mut(peer) {
                     p.name = name.clone();
                     p.os = os.clone();

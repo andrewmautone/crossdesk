@@ -1,0 +1,83 @@
+name: release
+
+# Every push to main becomes release "build-<run number>". Installed copies
+# with auto update on pick it up by themselves.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CROSSDESK_BUILD: ${{ github.run_number }}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+      - run: cargo build --release
+      - shell: bash
+        run: |
+          mkdir dist
+          cp target/release/crossdesk.exe dist/crossdesk-windows-x64.exe
+          cd dist && sha256sum crossdesk-windows-x64.exe > crossdesk-windows-x64.exe.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  macos:
+    runs-on: macos-latest
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: cargo test
+      # A stable signing certificate keeps the Accessibility permission across updates.
+      - name: Import signing certificate
+        if: env.MACOS_CERT_P12 != ''
+        continue-on-error: true
+        run: |
+          KC="$RUNNER_TEMP/sign.keychain-db"
+          security create-keychain -p ci "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p ci "$KC"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k ci "$KC"
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          echo "CROSSDESK_SIGN_IDENTITY=Crossdesk Self-Signed" >> "$GITHUB_ENV"
+      - run: UNIVERSAL=1 sh scripts/build-macos.sh
+      - run: |
+          mkdir dist
+          ditto -c -k --keepParent target/Crossdesk.app dist/Crossdesk-macos.zip
+          cd dist && shasum -a 256 Crossdesk-macos.zip > Crossdesk-macos.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+
+  release:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          body: Automatic build from ${{ github.sha }}.
+          files: dist/*
+          make_latest: true

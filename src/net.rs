@@ -89,9 +89,13 @@ pub fn start(shared: Arc<Shared>) {
 
 async fn listen(shared: Arc<Shared>) {
     let port = shared.config.lock().port;
-    match TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await {
-        Ok(l) => serve_on(shared, l).await,
-        Err(e) => shared.log(format!("cannot listen on TCP {port}: {e}")),
+    // Right after an update the previous copy may still hold the port for a moment.
+    for attempt in 0..20 {
+        match TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await {
+            Ok(l) => return serve_on(shared, l).await,
+            Err(e) if attempt == 19 => shared.log(format!("cannot listen on TCP {port}: {e}")),
+            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
     }
 }
 
@@ -373,13 +377,18 @@ async fn run_session(
 }
 
 async fn discovery(shared: Arc<Shared>) {
-    let sock = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, DISCOVERY_PORT)).await {
-        Ok(s) => s,
-        Err(e) => {
-            shared.log(format!("discovery disabled (UDP {DISCOVERY_PORT}): {e}"));
-            return;
+    let mut bound = None;
+    for attempt in 0..20 {
+        match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, DISCOVERY_PORT)).await {
+            Ok(s) => {
+                bound = Some(s);
+                break;
+            }
+            Err(e) if attempt == 19 => shared.log(format!("discovery disabled (UDP {DISCOVERY_PORT}): {e}")),
+            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
         }
-    };
+    }
+    let Some(sock) = bound else { return };
     let _ = sock.set_broadcast(true);
     let sock = Arc::new(sock);
 
