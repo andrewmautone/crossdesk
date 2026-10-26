@@ -59,6 +59,8 @@ pub struct Shared {
     pub repaint: Mutex<Option<eframe::egui::Context>>,
     pub updater: OnceLock<crate::updater::Updater>,
     pub update_status: Mutex<String>,
+    /// Last position the controlling machine put our cursor at.
+    pub remote_cursor: Mutex<Option<(i32, i32)>>,
 }
 
 fn now_ms() -> u64 {
@@ -100,6 +102,7 @@ impl Shared {
             repaint: Mutex::new(None),
             updater: OnceLock::new(),
             update_status: Mutex::new(String::new()),
+            remote_cursor: Mutex::new(None),
         });
         shared.rebuild_world();
         shared
@@ -268,6 +271,7 @@ impl Shared {
             c.settings = settings.clone();
             c.save();
         }
+        crate::effects::set_enabled(settings.effects);
         self.engine.lock().set_settings(settings);
     }
 
@@ -426,7 +430,9 @@ impl Shared {
             }
             Msg::Enter { x, y } => {
                 *self.controlled_by.lock() = Some(peer.to_string());
+                *self.remote_cursor.lock() = Some((x, y));
                 self.injector.lock().move_abs(x, y);
+                crate::effects::burst((x, y), crate::effects::Kind::Arrive);
                 self.repaint();
             }
             Msg::Leave => {
@@ -440,6 +446,9 @@ impl Shared {
                 };
                 if was {
                     self.injector.lock().release_all();
+                    if let Some(pt) = self.remote_cursor.lock().take() {
+                        crate::effects::burst(pt, crate::effects::Kind::Leave);
+                    }
                     if self.config.lock().settings.clipboard_sync {
                         self.clipboard.send_to(peer);
                     }
@@ -447,6 +456,7 @@ impl Shared {
                 }
             }
             Msg::MouseMove { x, y } if self.is_controller(peer) => {
+                *self.remote_cursor.lock() = Some((x, y));
                 self.injector.lock().move_abs(x, y)
             }
             Msg::MouseButton { button, down } if self.is_controller(peer) => {

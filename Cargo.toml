@@ -45,6 +45,9 @@ windows = { version = "0.58", features = [
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.24", features = ["highsierra"] }
 core-foundation = "0.10"
+foreign-types = "0.5"
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["NSGeometry"] }
 
 [build-dependencies]
 embed-resource = "2.4"

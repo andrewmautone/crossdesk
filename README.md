@@ -22,6 +22,10 @@ text follows too.
   own keyboard layout. With ABNT2 on both sides, everything matches. By default Ctrl and
   Cmd are swapped between Windows and macOS, so Ctrl+C on the PC does Cmd+C on the Mac.
 
+A drop of liquid swells on the edge while you push, bursts into ripples when the
+cursor leaves, and splashes where it arrives on the other screen (Settings to turn
+it off; `crossdesk --fx-demo` plays it on the main screen).
+
 Shortcuts on the computer whose keyboard you are using:
 
 | Shortcut | Effect |
@@ -100,6 +104,8 @@ cargo check --target aarch64-apple-darwin   # type-check the macOS code from Win
 | `src/input/keymap.rs` | HID ⇄ Windows scancode ⇄ macOS keycode |
 | `src/ui.rs` | egui window |
 | `src/tray.rs` | Tray / menu bar icon and menu |
+| `src/effects.rs` | Liquid ripple renderer and animation thread |
+| `src/overlay/` | Transparent click-through window per OS |
 | `src/updater.rs` | Self-update from GitHub Releases |
 
 The icons come from `assets/icon.svg` (large sizes, macOS), `assets/icon-small.svg`

@@ -3,10 +3,12 @@
 mod clipboard;
 mod config;
 mod crypto;
+mod effects;
 mod engine;
 mod input;
 mod layout;
 mod net;
+mod overlay;
 mod protocol;
 mod state;
 #[cfg(any(windows, target_os = "macos"))]
@@ -36,6 +38,26 @@ fn main() -> eframe::Result<()> {
     let shared = state::Shared::new(rt.handle().clone());
     let scroll_lines = shared.config.lock().settings.scroll_lines;
     shared.injector.lock().set_scroll_lines(scroll_lines);
+    let fx_shared = shared.clone();
+    let fx_on = shared.config.lock().settings.effects;
+    effects::start(move || fx_shared.local_monitors.lock().clone(), fx_on);
+    if std::env::args().any(|a| a == "--fx-demo") {
+        // Plays the effects on the right edge of the main screen, for checking how they look.
+        let mons = shared.local_monitors.lock().clone();
+        if let Some(m) = mons.iter().find(|m| m.primary).or(mons.first()).cloned() {
+            std::thread::spawn(move || {
+                let pt = (m.x + m.w - 1, m.y + m.h / 2);
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                for i in 1..=30 {
+                    effects::push(pt, i as f64 / 30.0);
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                effects::burst(pt, effects::Kind::Leave);
+                std::thread::sleep(std::time::Duration::from_millis(900));
+                effects::burst((m.x + 1, m.y + m.h / 3), effects::Kind::Arrive);
+            });
+        }
+    }
     net::start(shared.clone());
     shared.watch_monitors();
     input::start_capture(shared.clone());

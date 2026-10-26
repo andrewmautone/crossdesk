@@ -527,6 +527,10 @@ impl App {
         });
         ui.checkbox(&mut s.clipboard_sync, "Share copied text between computers");
         ui.checkbox(
+            &mut s.effects,
+            "Liquid ripple where the cursor leaves and enters a screen",
+        );
+        ui.checkbox(
             &mut s.swap_ctrl_cmd,
             "Swap Ctrl and Cmd/Win when the other computer runs a different system",
         )

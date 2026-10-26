@@ -116,6 +116,7 @@ fn park_point(pt: (i32, i32)) -> (i32, i32) {
 
 fn apply(d: Decision) -> bool {
     if let Some(pt) = d.freeze_at {
+        crate::effects::burst(pt, crate::effects::Kind::Leave);
         let park = park_point(pt);
         *PARK.lock() = Some(park);
         unsafe {
@@ -125,8 +126,19 @@ fn apply(d: Decision) -> bool {
     }
     if let Some(pt) = d.release_to {
         warp(pt.0, pt.1);
+        crate::effects::burst(pt, crate::effects::Kind::Arrive);
     }
     d.block
+}
+
+/// Show the swelling drop while the user pushes against an edge.
+fn show_push(engine: &crate::engine::Engine) {
+    let progress = engine.push_progress();
+    if progress > 0.0 {
+        if let Some(pt) = engine.push_point() {
+            crate::effects::push(pt, progress);
+        }
+    }
 }
 
 /// Put the cursor at `(x, y)` and give it back to the user.
@@ -350,10 +362,12 @@ unsafe fn handle_raw(handle: HRAWINPUT) {
     if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 || (mouse.lLastX == 0 && mouse.lLastY == 0) {
         return;
     }
-    let d = s
-        .engine
-        .lock()
-        .on_push_delta(mouse.lLastX as f64, mouse.lLastY as f64);
+    let mut engine = s.engine.lock();
+    let d = engine.on_push_delta(mouse.lLastX as f64, mouse.lLastY as f64);
+    if d == Decision::default() {
+        show_push(&engine);
+    }
+    drop(engine);
     apply(d);
 }
 

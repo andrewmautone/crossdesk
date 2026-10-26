@@ -162,6 +162,7 @@ fn run_tap(shared: Arc<Shared>) -> Result<(), String> {
 
 fn apply(d: Decision) -> bool {
     if let Some(pt) = d.freeze_at {
+        crate::effects::burst(pt, crate::effects::Kind::Leave);
         *FREEZE_PT.lock() = Some(pt);
         if !FROZEN.swap(true, Ordering::SeqCst) {
             let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(false);
@@ -169,6 +170,7 @@ fn apply(d: Decision) -> bool {
     }
     if let Some(pt) = d.release_to {
         warp(pt.0, pt.1);
+        crate::effects::burst(pt, crate::effects::Kind::Arrive);
     }
     d.block
 }
@@ -217,6 +219,12 @@ fn handle(s: &Arc<Shared>, etype: CGEventType, event: &CGEvent) -> bool {
             if !frozen && d == Decision::default() {
                 // The deltas keep coming while the cursor is pinned on an edge.
                 d = engine.on_push_delta(dx, dy);
+                let progress = engine.push_progress();
+                if d == Decision::default() && progress > 0.0 {
+                    if let Some(at) = engine.push_point() {
+                        crate::effects::push(at, progress);
+                    }
+                }
             }
             drop(engine);
             let block = apply(d);

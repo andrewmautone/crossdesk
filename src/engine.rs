@@ -214,6 +214,21 @@ impl Engine {
         self.enter_remote(hit.monitor, hit.entry, hit.pt)
     }
 
+    /// How far the current push has got, 0..1.
+    pub fn push_progress(&self) -> f64 {
+        match self.push {
+            Some(p) if p.last.elapsed() <= PUSH_RESET && self.resistance() > 0.0 => {
+                (p.amount / self.resistance()).min(1.0)
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// Where the cursor rests against an edge while a push is building up.
+    pub fn push_point(&self) -> Option<(i32, i32)> {
+        self.edge.as_ref().map(|e| e.pt)
+    }
+
     pub fn on_push_delta(&mut self, dx: f64, dy: f64) -> Decision {
         if self.remote.is_some() {
             return Decision::default();
