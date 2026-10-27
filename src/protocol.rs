@@ -86,6 +86,9 @@ pub enum Msg {
     Clipboard(String),
     /// The sender removed its trust in the receiver.
     Unpair,
+    /// A diagnostic line for the other machine's log (kept last: bincode
+    /// numbers variants in order).
+    Diag(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

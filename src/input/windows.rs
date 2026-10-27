@@ -5,7 +5,7 @@ use crate::layout::Monitor;
 use crate::protocol::Button;
 use crate::state::Shared;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use windows::core::w;
@@ -21,7 +21,7 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT,
-    RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEMOUSE,
+    RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -37,6 +37,20 @@ static HIDDEN: AtomicBool = AtomicBool::new(false);
 static LAST_RAW: AtomicU64 = AtomicU64::new(0);
 static RAW_SEEN: AtomicBool = AtomicBool::new(false);
 static START: OnceLock<Instant> = OnceLock::new();
+
+// Keyboard watchdog. Raw input sees every physical key; if the low-level hook
+// stops seeing them, Windows dropped the hook (it does so silently when a hook
+// call is too slow) or an elevated window has the focus.
+static HINST: AtomicIsize = AtomicIsize::new(0);
+static KBD_HOOK: AtomicIsize = AtomicIsize::new(0);
+static LAST_HOOK_KEY: AtomicU64 = AtomicU64::new(0);
+static LAST_RAW_KEY: AtomicU64 = AtomicU64::new(0);
+static LAST_REINSTALL: AtomicU64 = AtomicU64::new(0);
+static HOOK_MISSING: AtomicBool = AtomicBool::new(false);
+/// Reported the first key sent since the cursor last left this machine.
+static KEYS_ANNOUNCED: AtomicBool = AtomicBool::new(false);
+/// A hook call slower than this risks Windows removing the hook.
+const SLOW_HOOK_MS: u64 = 150;
 
 fn now_ms() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
@@ -76,11 +90,15 @@ pub fn start_capture(shared: Arc<Shared>) {
                 }
             };
             let hinst = windows::Win32::Foundation::HINSTANCE(hmod.0);
+            HINST.store(hinst.0 as isize, Ordering::SeqCst);
             let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hinst, 0);
             let kbd = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), hinst, 0);
             if let Err(e) = mouse.as_ref().and(kbd.as_ref()) {
                 *shared.capture_error.lock() = Some(format!("cannot install input hooks: {e}"));
                 return;
+            }
+            if let Ok(h) = kbd {
+                KBD_HOOK.store(h.0 as isize, Ordering::SeqCst);
             }
             if let Err(e) = raw_input_window(hinst) {
                 shared.log(format!(
@@ -116,6 +134,7 @@ fn park_point(pt: (i32, i32)) -> (i32, i32) {
 
 fn apply(d: Decision) -> bool {
     if let Some(pt) = d.freeze_at {
+        KEYS_ANNOUNCED.store(false, Ordering::Relaxed);
         crate::effects::burst(pt, crate::effects::Kind::Leave);
         let park = park_point(pt);
         *PARK.lock() = Some(park);
@@ -190,11 +209,26 @@ fn show_cursor() {
     }
 }
 
+/// Log hook calls slow enough that Windows may drop the hook.
+fn check_slow(which: &str, started: Instant) {
+    let ms = started.elapsed().as_millis() as u64;
+    if ms >= SLOW_HOOK_MS {
+        if let Some(s) = shared() {
+            s.diag(format!(
+                "slow {which} hook call: {ms} ms (Windows drops hooks that stall)"
+            ));
+        }
+    }
+}
+
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
+        let started = Instant::now();
         let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
         let injected = info.flags & LLMHF_INJECTED != 0 || info.dwExtraInfo == MAGIC;
-        if !injected && handle_mouse(wparam.0 as u32, info) {
+        let block = !injected && handle_mouse(wparam.0 as u32, info);
+        check_slow("mouse", started);
+        if block {
             return LRESULT(1);
         }
     }
@@ -241,9 +275,13 @@ fn handle_mouse(msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
 
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
+        let started = Instant::now();
+        LAST_HOOK_KEY.store(now_ms(), Ordering::Relaxed);
         let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
         let injected = info.flags.0 & LLKHF_INJECTED.0 != 0 || info.dwExtraInfo == MAGIC;
-        if !injected && handle_key(wparam.0 as u32, info) {
+        let block = !injected && handle_key(wparam.0 as u32, info);
+        check_slow("keyboard", started);
+        if block {
             return LRESULT(1);
         }
     }
@@ -253,7 +291,8 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 fn handle_key(msg: u32, info: &KBDLLHOOKSTRUCT) -> bool {
     let Some(s) = shared() else { return false };
     let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-    let remote = s.engine.lock().active_target().is_some();
+    let target = s.engine.lock().active_target().map(str::to_string);
+    let remote = target.is_some();
     // AltGr sends a fake left Ctrl with this marker; the remote side makes its own.
     if info.scanCode & 0x200 != 0 {
         return remote;
@@ -266,9 +305,180 @@ fn handle_key(msg: u32, info: &KBDLLHOOKSTRUCT) -> bool {
         _ => keymap::hid_from_win(if extended { 0xE000 | sc } else { sc })
             .or_else(|| keymap::hid_from_win(sc)),
     };
-    let Some(hid) = hid else { return remote };
+    let Some(hid) = hid else {
+        if remote && down {
+            s.diag(format!(
+                "key not sent, no mapping: vk=0x{:02X} scan=0x{sc:02X} extended={extended}",
+                info.vkCode
+            ));
+        }
+        return remote;
+    };
+    if let Some(t) = &target {
+        if down && !KEYS_ANNOUNCED.swap(true, Ordering::Relaxed) {
+            let name = s
+                .peers
+                .lock()
+                .get(t)
+                .map_or_else(|| t.clone(), |p| p.name.clone());
+            s.log(format!("[diag] sending keys to {name}"));
+        }
+    }
     let d = s.engine.lock().on_key(hid, down);
     apply(d)
+}
+
+/// Executable name of the foreground window's process, and whether it runs
+/// elevated (its token cannot be opened from here). Elevated windows receive
+/// neither our hook's view of the keyboard nor keys we inject.
+fn foreground_process() -> Option<(String, bool)> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{
+        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{
+        OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 260];
+        let mut len = buf.len() as u32;
+        let name = if QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok()
+        {
+            let full = String::from_utf16_lossy(&buf[..len as usize]);
+            full.rsplit('\\').next().unwrap_or(&full).to_string()
+        } else {
+            format!("pid {pid}")
+        };
+        let mut token = HANDLE::default();
+        let elevated = if OpenProcessToken(process, TOKEN_QUERY, &mut token).is_ok() {
+            let mut e = TOKEN_ELEVATION::default();
+            let mut size = 0u32;
+            let ok = GetTokenInformation(
+                token,
+                TokenElevation,
+                Some(&mut e as *mut _ as *mut _),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut size,
+            )
+            .is_ok();
+            let _ = CloseHandle(token);
+            ok && e.TokenIsElevated != 0 && !self_elevated()
+        } else {
+            !self_elevated()
+        };
+        let _ = CloseHandle(process);
+        Some((name, elevated))
+    }
+}
+
+fn self_elevated() -> bool {
+    static ELEVATED: OnceLock<bool> = OnceLock::new();
+    *ELEVATED.get_or_init(|| unsafe {
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::Security::{
+            GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+        };
+        use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return false;
+        }
+        let mut e = TOKEN_ELEVATION::default();
+        let mut size = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut e as *mut _ as *mut _),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut size,
+        )
+        .is_ok();
+        let _ = CloseHandle(token);
+        ok && e.TokenIsElevated != 0
+    })
+}
+
+pub fn focused_app() -> Option<String> {
+    foreground_process().map(|(name, _)| name)
+}
+
+pub fn injection_blocker() -> Option<String> {
+    match foreground_process() {
+        Some((name, true)) => Some(format!(
+            "{name} runs as administrator, and Windows does not let a normal app type into it"
+        )),
+        _ => None,
+    }
+}
+
+/// Called every second on the hook thread: raw input saw keys the hook did not.
+fn check_keyboard_hook() {
+    let Some(s) = shared() else { return };
+    let (raw, hook, now) = (
+        LAST_RAW_KEY.load(Ordering::Relaxed),
+        LAST_HOOK_KEY.load(Ordering::Relaxed),
+        now_ms(),
+    );
+    if raw == 0 || now - raw < 300 {
+        return; // nothing typed yet, or the hook may still be about to run
+    }
+    let missing = raw > hook + 300;
+    if !missing {
+        if HOOK_MISSING.swap(false, Ordering::Relaxed) {
+            s.diag("keyboard hook sees keys again");
+        }
+        return;
+    }
+    let fg = foreground_process();
+    let first = !HOOK_MISSING.swap(true, Ordering::Relaxed);
+    if first {
+        let fg_text = match &fg {
+            Some((name, true)) => format!("{name} (administrator)"),
+            Some((name, false)) => name.clone(),
+            None => "unknown".into(),
+        };
+        let remote = s.engine.lock().active_target().is_some();
+        s.diag(format!(
+            "keyboard hook is not receiving keys (focused app: {fg_text}, \
+             controlling another machine: {remote})"
+        ));
+    }
+    if fg.is_some_and(|(_, elevated)| elevated) {
+        return; // reinstalling cannot help while an elevated window has the focus
+    }
+    if now - LAST_REINSTALL.load(Ordering::Relaxed) < 5000 {
+        return;
+    }
+    LAST_REINSTALL.store(now, Ordering::Relaxed);
+    unsafe {
+        let old = KBD_HOOK.load(Ordering::SeqCst);
+        if old != 0 {
+            let _ = UnhookWindowsHookEx(HHOOK(old as _));
+        }
+        let hinst = HINSTANCE(HINST.load(Ordering::SeqCst) as _);
+        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), hinst, 0) {
+            Ok(h) => {
+                KBD_HOOK.store(h.0 as isize, Ordering::SeqCst);
+                s.diag("keyboard hook reinstalled");
+            }
+            Err(e) => s.diag(format!("keyboard hook reinstall failed: {e}")),
+        }
+    }
 }
 
 /// A message-only window that receives raw mouse movement. Unlike the hook,
@@ -297,27 +507,31 @@ unsafe fn raw_input_window(hinst: HINSTANCE) -> windows::core::Result<HWND> {
         hinst,
         None,
     )?;
-    let device = RAWINPUTDEVICE {
-        usUsagePage: 0x01,
-        usUsage: 0x02,
-        dwFlags: RIDEV_INPUTSINK,
-        hwndTarget: hwnd,
-    };
-    RegisterRawInputDevices(&[device], std::mem::size_of::<RAWINPUTDEVICE>() as u32)?;
+    RegisterRawInputDevices(
+        &[raw_device(hwnd, 0x02), raw_device(hwnd, 0x06)],
+        std::mem::size_of::<RAWINPUTDEVICE>() as u32,
+    )?;
     // Raw input is registered per process, and the UI toolkit registers its own
     // window later, taking the mouse over. Take it back every second.
     SetTimer(hwnd, 1, 1000, None);
     Ok(hwnd)
 }
 
-unsafe fn claim_raw_input(hwnd: HWND) {
-    let device = RAWINPUTDEVICE {
+/// Generic desktop page: usage 0x02 is the mouse, 0x06 the keyboard.
+fn raw_device(hwnd: HWND, usage: u16) -> RAWINPUTDEVICE {
+    RAWINPUTDEVICE {
         usUsagePage: 0x01,
-        usUsage: 0x02,
+        usUsage: usage,
         dwFlags: RIDEV_INPUTSINK,
         hwndTarget: hwnd,
-    };
-    let _ = RegisterRawInputDevices(&[device], std::mem::size_of::<RAWINPUTDEVICE>() as u32);
+    }
+}
+
+unsafe fn claim_raw_input(hwnd: HWND, usage: u16) {
+    let _ = RegisterRawInputDevices(
+        &[raw_device(hwnd, usage)],
+        std::mem::size_of::<RAWINPUTDEVICE>() as u32,
+    );
 }
 
 unsafe extern "system" fn raw_input_proc(
@@ -328,8 +542,13 @@ unsafe extern "system" fn raw_input_proc(
 ) -> LRESULT {
     if msg == WM_INPUT {
         handle_raw(HRAWINPUT(lparam.0 as _));
-    } else if msg == WM_TIMER && !raw_alive() {
-        claim_raw_input(hwnd);
+    } else if msg == WM_TIMER {
+        if !raw_alive() {
+            claim_raw_input(hwnd, 0x02);
+        }
+        // Nothing in the UI reads raw keys, so the keyboard is simply kept.
+        claim_raw_input(hwnd, 0x06);
+        check_keyboard_hook();
     }
     if msg == WM_INPUT && !RAW_SEEN.swap(true, Ordering::Relaxed) {
         if let Some(s) = shared() {
@@ -341,9 +560,6 @@ unsafe extern "system" fn raw_input_proc(
 
 unsafe fn handle_raw(handle: HRAWINPUT) {
     let Some(s) = shared() else { return };
-    if PARK.lock().is_some() {
-        return; // another machine has the cursor; the hook measures movement then
-    }
     let mut raw = RAWINPUT::default();
     let mut size = std::mem::size_of::<RAWINPUT>() as u32;
     let n = GetRawInputData(
@@ -353,9 +569,20 @@ unsafe fn handle_raw(handle: HRAWINPUT) {
         &mut size,
         std::mem::size_of::<RAWINPUTHEADER>() as u32,
     );
-    // Injected input has no device; absolute devices (tablets, remote desktop) cannot push.
-    if n == u32::MAX || raw.header.dwType != RIM_TYPEMOUSE.0 || raw.header.hDevice.0.is_null() {
+    // Injected input has no device.
+    if n == u32::MAX || raw.header.hDevice.0.is_null() {
         return;
+    }
+    if raw.header.dwType == RIM_TYPEKEYBOARD.0 {
+        LAST_RAW_KEY.store(now_ms(), Ordering::Relaxed);
+        return;
+    }
+    // Absolute devices (tablets, remote desktop) cannot push.
+    if raw.header.dwType != RIM_TYPEMOUSE.0 {
+        return;
+    }
+    if PARK.lock().is_some() {
+        return; // another machine has the cursor; the hook measures movement then
     }
     LAST_RAW.store(now_ms(), Ordering::Relaxed);
     let mouse = raw.data.mouse;

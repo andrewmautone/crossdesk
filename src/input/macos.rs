@@ -44,6 +44,8 @@ fn warp_to(x: i32, y: i32, skip_next: bool) {
     }
 }
 static CAPS_DOWN: Mutex<bool> = Mutex::new(false);
+/// Reported the first key sent since the cursor last left this machine.
+static KEYS_ANNOUNCED: AtomicBool = AtomicBool::new(false);
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -51,8 +53,14 @@ extern "C" {
     static kAXTrustedCheckOptionPrompt: CFStringRef;
 }
 
+#[link(name = "Carbon", kind = "framework")]
+extern "C" {
+    fn IsSecureEventInputEnabled() -> bool;
+}
+
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
+    fn CGSessionCopyCurrentDictionary() -> CFDictionaryRef;
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     fn CGSetLocalEventsSuppressionInterval(seconds: f64) -> i32;
     fn CGGetLastMouseDelta(dx: *mut i32, dy: *mut i32);
@@ -73,6 +81,70 @@ fn accessibility_trusted(prompt: bool) -> bool {
 }
 
 pub fn init_process() {}
+
+/// Localized name of the running app with this pid.
+fn app_name(pid: i32) -> Option<String> {
+    use objc2::rc::autoreleasepool;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSString;
+    autoreleasepool(|_| unsafe {
+        let app: *mut AnyObject = msg_send![
+            class!(NSRunningApplication),
+            runningApplicationWithProcessIdentifier: pid
+        ];
+        if app.is_null() {
+            return None;
+        }
+        let name: *mut NSString = msg_send![app, localizedName];
+        name.as_ref().map(|n| n.to_string())
+    })
+}
+
+/// The app that gets the keys: the frontmost one, not the one under the cursor.
+pub fn focused_app() -> Option<String> {
+    use objc2::rc::autoreleasepool;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    let pid = autoreleasepool(|_| unsafe {
+        let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let app: *mut AnyObject = msg_send![ws, frontmostApplication];
+        if app.is_null() {
+            return None;
+        }
+        let pid: i32 = msg_send![app, processIdentifier];
+        Some(pid)
+    })?;
+    app_name(pid).or_else(|| Some(format!("pid {pid}")))
+}
+
+/// Secure Event Input (password fields, password managers, Terminal's Secure
+/// Keyboard Entry) keeps keys from other processes out of the focused app.
+pub fn injection_blocker() -> Option<String> {
+    if !unsafe { IsSecureEventInputEnabled() } {
+        return None;
+    }
+    let holder = unsafe {
+        let dict = CGSessionCopyCurrentDictionary();
+        if dict.is_null() {
+            None
+        } else {
+            let dict: CFDictionary<CFString, core_foundation::base::CFType> =
+                CFDictionary::wrap_under_create_rule(dict);
+            dict.find(CFString::from_static_string("kCGSSessionSecureInputPID"))
+                .and_then(|v| v.downcast::<core_foundation::number::CFNumber>())
+                .and_then(|n| n.to_i32())
+        }
+    };
+    let who = match holder {
+        Some(pid) => app_name(pid).unwrap_or_else(|| format!("pid {pid}")),
+        None => "an unknown app".into(),
+    };
+    Some(format!(
+        "macOS Secure Input is on, held by {who} (a password field, password manager or \
+         Terminal's Secure Keyboard Entry); macOS drops typed keys from other apps until it ends"
+    ))
+}
 
 pub fn shutdown() {
     if FROZEN.swap(false, Ordering::SeqCst) {
@@ -136,6 +208,9 @@ fn run_tap(shared: Arc<Shared>) -> Result<(), String> {
         events,
         move |_proxy, etype, event| {
             if let TapDisabledByTimeout | TapDisabledByUserInput = etype {
+                s.diag(format!(
+                    "macOS disabled the event tap ({etype:?}); re-enabling it"
+                ));
                 let port = TAP_PORT.load(Ordering::SeqCst);
                 if !port.is_null() {
                     unsafe { CGEventTapEnable(port as CFMachPortRef, true) };
@@ -176,6 +251,7 @@ fn run_tap(shared: Arc<Shared>) -> Result<(), String> {
 
 fn apply(d: Decision) -> bool {
     if let Some(pt) = d.freeze_at {
+        KEYS_ANNOUNCED.store(false, Ordering::Relaxed);
         crate::effects::burst(pt, crate::effects::Kind::Leave);
         // Park the idle cursor away from the edge so the Dock and hover previews let go.
         let park = super::away_from_edge(pt, &Platform::monitors());
@@ -296,8 +372,14 @@ fn handle(s: &Arc<Shared>, etype: CGEventType, event: &CGEvent) -> bool {
             let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
             let remote = s.engine.lock().active_target().is_some();
             let Some(hid) = keymap::hid_from_mac(keycode) else {
+                if remote && matches!(etype, KeyDown) {
+                    s.diag(format!("key not sent, no mapping: keycode=0x{keycode:02X}"));
+                }
                 return remote;
             };
+            if remote && matches!(etype, KeyDown) && !KEYS_ANNOUNCED.swap(true, Ordering::Relaxed) {
+                s.log("[diag] sending keys to the other machine");
+            }
             let d = s.engine.lock().on_key(hid, matches!(etype, KeyDown));
             apply(d)
         }

@@ -35,3 +35,11 @@ impl Backend for Platform {
     fn wheel(&mut self, _dx: i32, _dy: i32) {}
     fn key(&mut self, _hid: u16, _down: bool) {}
 }
+
+pub fn focused_app() -> Option<String> {
+    None
+}
+
+pub fn injection_blocker() -> Option<String> {
+    None
+}

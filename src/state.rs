@@ -61,6 +61,56 @@ pub struct Shared {
     pub update_status: Mutex<String>,
     /// Last position the controlling machine put our cursor at.
     pub remote_cursor: Mutex<Option<(i32, i32)>>,
+    /// Keyboard diagnostics for the machine controlling us.
+    key_diag: Mutex<KeyDiag>,
+    log_file: Mutex<Option<std::fs::File>>,
+}
+
+#[derive(Default)]
+struct KeyDiag {
+    /// Reported where the first key since the last Enter went.
+    announced: bool,
+    /// Something on this machine is swallowing injected keys.
+    blocked: bool,
+    /// Reported keys arriving from a machine that is not in control.
+    ignored: bool,
+}
+
+/// `crossdesk.log` next to the config, restarted when it grows past 2 MB.
+fn open_log_file() -> Option<std::fs::File> {
+    let path = crate::config::path().with_file_name("crossdesk.log");
+    let big = std::fs::metadata(&path).is_ok_and(|m| m.len() > 2 * 1024 * 1024);
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(!big)
+        .write(true)
+        .truncate(big)
+        .open(path)
+        .ok()
+}
+
+/// "2026-10-27 14:03:09 UTC" without pulling in a date crate.
+fn timestamp() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs()) as i64;
+    let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC",
+        rem / 3600,
+        rem / 60 % 60,
+        rem % 60
+    )
 }
 
 fn now_ms() -> u64 {
@@ -103,6 +153,8 @@ impl Shared {
             updater: OnceLock::new(),
             update_status: Mutex::new(String::new()),
             remote_cursor: Mutex::new(None),
+            key_diag: Mutex::new(KeyDiag::default()),
+            log_file: Mutex::new(open_log_file()),
         });
         shared.rebuild_world();
         shared
@@ -116,6 +168,10 @@ impl Shared {
     pub fn log(&self, msg: impl Into<String>) {
         let msg = msg.into();
         eprintln!("{msg}");
+        if let Some(f) = self.log_file.lock().as_mut() {
+            use std::io::Write;
+            let _ = writeln!(f, "{} {msg}", timestamp());
+        }
         let mut log = self.log.lock();
         log.push_back(msg);
         while log.len() > 200 {
@@ -123,6 +179,13 @@ impl Shared {
         }
         drop(log);
         self.repaint();
+    }
+
+    /// Log a diagnostic here and in every connected machine's log.
+    pub fn diag(&self, msg: impl Into<String>) {
+        let msg = msg.into();
+        self.log(format!("[diag] {msg}"));
+        self.registry.broadcast(Msg::Diag(msg));
     }
 
     /// Log without spamming the UI with the same reconnect failure every few seconds.
@@ -384,6 +447,27 @@ impl Shared {
         self.controlled_by.lock().as_deref() == Some(peer)
     }
 
+    /// Report (here and on the controller) which app receives the remote keys,
+    /// and whenever something starts or stops swallowing them.
+    fn check_key_target(&self) {
+        let blocker = input::injection_blocker();
+        let mut d = self.key_diag.lock();
+        let first = !d.announced;
+        let changed = d.blocked != blocker.is_some();
+        d.announced = true;
+        d.blocked = blocker.is_some();
+        drop(d);
+        if first {
+            let app = input::focused_app().unwrap_or_else(|| "unknown".into());
+            self.diag(format!("receiving keys; they go to the focused app: {app}"));
+        }
+        match blocker {
+            Some(why) if changed || first => self.diag(format!("keys are being blocked: {why}")),
+            None if changed => self.diag("keys are no longer blocked"),
+            _ => {}
+        }
+    }
+
     pub fn handle_msg(&self, peer: &str, peer_os: &str, msg: Msg) {
         match msg {
             Msg::Auth => {}
@@ -441,6 +525,7 @@ impl Shared {
                     input::warp(x, y);
                 }
                 *self.controlled_by.lock() = Some(peer.to_string());
+                *self.key_diag.lock() = KeyDiag::default();
                 *self.remote_cursor.lock() = Some((x, y));
                 self.injector.lock().move_abs(x, y);
                 crate::effects::burst((x, y), crate::effects::Kind::Arrive);
@@ -493,7 +578,31 @@ impl Shared {
                 } else {
                     hid
                 };
+                if down {
+                    self.check_key_target();
+                }
                 self.injector.lock().key(hid, down)
+            }
+            Msg::Key { .. } => {
+                let mut d = self.key_diag.lock();
+                if !d.ignored {
+                    d.ignored = true;
+                    drop(d);
+                    let owner = self.controlled_by.lock().clone();
+                    self.diag(format!(
+                        "ignoring keys from a machine that does not control this one \
+                         (controlled by: {})",
+                        owner.as_deref().unwrap_or("nobody")
+                    ));
+                }
+            }
+            Msg::Diag(text) => {
+                let name = self
+                    .peers
+                    .lock()
+                    .get(peer)
+                    .map_or_else(|| peer.to_string(), |p| p.name.clone());
+                self.log(format!("[diag from {name}] {text}"));
             }
             Msg::Clipboard(text) => {
                 if self.config.lock().settings.clipboard_sync {

@@ -5,17 +5,23 @@ pub mod keymap;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use self::windows::{init_process, shutdown, start_capture, warp, Platform};
+pub use self::windows::{
+    focused_app, init_process, injection_blocker, shutdown, start_capture, warp, Platform,
+};
 
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use self::macos::{init_process, shutdown, start_capture, warp, Platform};
+pub use self::macos::{
+    focused_app, init_process, injection_blocker, shutdown, start_capture, warp, Platform,
+};
 
 #[cfg(not(any(windows, target_os = "macos")))]
 mod unsupported;
 #[cfg(not(any(windows, target_os = "macos")))]
-pub use self::unsupported::{init_process, shutdown, start_capture, warp, Platform};
+pub use self::unsupported::{
+    focused_app, init_process, injection_blocker, shutdown, start_capture, warp, Platform,
+};
 
 use crate::layout::Monitor;
 use crate::protocol::Button;
@@ -31,6 +37,16 @@ mod tests {
         for m in monitors() {
             eprintln!("{m:?} physical={:?}", m.physical_mm());
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn print_focus() {
+        eprintln!(
+            "focused={:?} blocker={:?}",
+            focused_app(),
+            injection_blocker()
+        );
     }
 
     #[test]
