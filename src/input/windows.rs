@@ -50,6 +50,11 @@ static MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
 static LAST_HOOK_MOUSE: AtomicU64 = AtomicU64::new(0);
 static LAST_RAW_MOUSE: AtomicU64 = AtomicU64::new(0);
 static MOUSE_MISSING: AtomicBool = AtomicBool::new(false);
+/// When a probe key was injected to see whether the hook still gets any keys.
+static SELFTEST_AT: AtomicU64 = AtomicU64::new(0);
+static SELFTEST_SEEN: AtomicU64 = AtomicU64::new(0);
+/// Our own window that had the focus when the cursor left; it gets it back on return.
+static SET_ASIDE: AtomicIsize = AtomicIsize::new(0);
 static LAST_HOOK_KEY: AtomicU64 = AtomicU64::new(0);
 static LAST_RAW_KEY: AtomicU64 = AtomicU64::new(0);
 static LAST_REINSTALL: AtomicU64 = AtomicU64::new(0);
@@ -150,6 +155,7 @@ fn apply(d: Decision) -> bool {
     if let Some(pt) = d.freeze_at {
         KEYS_ANNOUNCED.store(false, Ordering::Relaxed);
         crate::effects::burst(pt, crate::effects::Kind::Leave);
+        step_aside_focus();
         // A file drag stays over the drop target that ends it later (see `crate::dnd`).
         let park = if crate::dnd::crossed() {
             pt
@@ -186,6 +192,46 @@ pub fn warp(x: i32, y: i32) {
         let _ = SetCursorPos(x, y);
     }
     show_cursor();
+    restore_focus();
+}
+
+/// Keys meant for another machine went missing whenever one of our own windows
+/// had the focus: the keyboard hook stops being called (seen in every case in
+/// the field). While the cursor is away, the focus goes to the desktop.
+/// Off the hook thread: focus changes wait on other threads.
+fn step_aside_focus() {
+    std::thread::spawn(|| unsafe {
+        let fg = GetForegroundWindow();
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, Some(&mut pid));
+        if fg.0.is_null() || pid != windows::Win32::System::Threading::GetCurrentProcessId() {
+            return;
+        }
+        SET_ASIDE.store(fg.0 as isize, Ordering::SeqCst);
+        let _ = SetForegroundWindow(GetShellWindow());
+    });
+}
+
+fn restore_focus() {
+    let h = SET_ASIDE.swap(0, Ordering::SeqCst);
+    if h == 0 {
+        return;
+    }
+    std::thread::spawn(move || unsafe {
+        let hwnd = HWND(h as _);
+        if IsWindow(hwnd).as_bool() && GetForegroundWindow() == GetShellWindow() {
+            let _ = SetForegroundWindow(hwnd);
+        }
+    });
+}
+
+/// Class name of the foreground window, to tell our own windows apart.
+fn foreground_class() -> String {
+    unsafe {
+        let mut buf = [0u16; 128];
+        let n = GetClassNameW(GetForegroundWindow(), &mut buf);
+        String::from_utf16_lossy(&buf[..n.max(0) as usize])
+    }
 }
 
 const CURSOR_IDS: [u32; 13] = [
@@ -305,8 +351,13 @@ fn handle_mouse(msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let started = Instant::now();
-        LAST_HOOK_KEY.store(now_ms(), Ordering::Relaxed);
         let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+        if info.dwExtraInfo == MAGIC && info.vkCode == VK_NONAME.0 as u32 {
+            // The watchdog's probe key: proof the hook is still called.
+            SELFTEST_SEEN.store(now_ms(), Ordering::Relaxed);
+            return LRESULT(1);
+        }
+        LAST_HOOK_KEY.store(now_ms(), Ordering::Relaxed);
         let injected = info.flags.0 & LLKHF_INJECTED.0 != 0 || info.dwExtraInfo == MAGIC;
         let block = !injected && handle_key(wparam.0 as u32, info);
         check_slow("keyboard", started);
@@ -463,6 +514,15 @@ fn check_keyboard_hook() {
         LAST_HOOK_KEY.load(Ordering::Relaxed),
         now_ms(),
     );
+    let probe = SELFTEST_AT.load(Ordering::Relaxed);
+    if probe != 0 && now - probe > 300 {
+        SELFTEST_AT.store(0, Ordering::Relaxed);
+        let seen = SELFTEST_SEEN.load(Ordering::Relaxed) >= probe;
+        s.diag(format!(
+            "keyboard hook self-test: an injected key {} the hook",
+            if seen { "still reaches" } else { "does not reach" }
+        ));
+    }
     if raw == 0 || now - raw < 300 {
         return; // nothing typed yet, or the hook may still be about to run
     }
@@ -483,9 +543,25 @@ fn check_keyboard_hook() {
         };
         let remote = s.engine.lock().active_target().is_some();
         s.diag(format!(
-            "keyboard hook is not receiving keys (focused app: {fg_text}, \
-             controlling another machine: {remote})"
+            "keyboard hook is not receiving keys (focused app: {fg_text}, window class: {}, \
+             controlling another machine: {remote})",
+            foreground_class()
         ));
+        // Is the hook dead, or do only physical keys skip it?
+        SELFTEST_AT.store(now, Ordering::Relaxed);
+        let probe = |up: KEYBD_EVENT_FLAGS| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_NONAME,
+                    wScan: 0,
+                    dwFlags: up,
+                    time: 0,
+                    dwExtraInfo: MAGIC,
+                },
+            },
+        };
+        send(&[probe(KEYBD_EVENT_FLAGS(0)), probe(KEYEVENTF_KEYUP)]);
     }
     if fg.is_some_and(|(_, elevated)| elevated) {
         return; // reinstalling cannot help while an elevated window has the focus
