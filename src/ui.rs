@@ -558,7 +558,12 @@ impl App {
             ui.label("Ignore corners (pixels):");
             ui.add(egui::DragValue::new(&mut s.corner_px).range(0..=400));
         });
-        ui.checkbox(&mut s.clipboard_sync, "Share copied text between computers");
+        ui.checkbox(
+            &mut s.clipboard_sync,
+            "Share copied text, images and files between computers",
+        )
+        .on_hover_text("Copied files travel when the cursor crosses, up to 500 MB in total.");
+        ui.checkbox(&mut s.drag_files, "Drag files from one computer to the other");
         ui.checkbox(
             &mut s.effects,
             "Liquid ripple where the cursor leaves and enters a screen",

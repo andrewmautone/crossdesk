@@ -13,7 +13,8 @@ pub use self::windows::{
 mod macos;
 #[cfg(target_os = "macos")]
 pub use self::macos::{
-    focused_app, init_process, injection_blocker, shutdown, start_capture, warp, Platform,
+    cancel_os_drag, focused_app, init_process, injection_blocker, shutdown, start_capture, warp,
+    Platform,
 };
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -76,6 +77,9 @@ pub struct Decision {
     pub freeze_at: Option<(i32, i32)>,
     /// Control came back: unfreeze and put the cursor here.
     pub release_to: Option<(i32, i32)>,
+    /// A held button reached an edge to another machine: find out whether it
+    /// drags files (`crate::dnd`), which may cross.
+    pub probe_drag: bool,
 }
 
 pub trait Backend: Send {

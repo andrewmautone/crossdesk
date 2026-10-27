@@ -956,11 +956,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "socket2",
  "spake2",
  "tokio",
  "tray-icon",
  "ureq",
  "windows 0.58.0",
+ "windows-core 0.58.0",
 ]
 
 [[package]]

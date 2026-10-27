@@ -32,7 +32,10 @@ pub struct Settings {
     pub speed: BTreeMap<String, f32>,
     /// How far (pixels) to keep pushing past an edge before the cursor crosses; 0 = at once.
     pub edge_resistance: i32,
+    /// Copied text, images and files (up to `transfer::CLIP_FILES_MAX`) follow the cursor.
     pub clipboard_sync: bool,
+    /// Drag files from one computer and drop them on another.
+    pub drag_files: bool,
     /// Liquid ripple where the cursor leaves and enters a screen.
     pub effects: bool,
     /// Refract the real screen content (needs Screen Recording on macOS).
@@ -63,6 +66,7 @@ impl Default for Settings {
             auto_speed: true,
             speed: BTreeMap::new(),
             clipboard_sync: true,
+            drag_files: true,
             effects: true,
             distort: true,
             swap_ctrl_cmd: true,

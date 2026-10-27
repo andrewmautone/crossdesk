@@ -2,8 +2,8 @@
 
 Use one mouse and keyboard across computers on your local network (Windows and macOS).
 Push the cursor past a screen edge and it continues on the other computer, as if that
-computer's screen were one more monitor. The keyboard follows the cursor, and copied
-text follows too.
+computer's screen were one more monitor. The keyboard follows the cursor, and so does
+whatever you copied: text, images and files.
 
 ## How it works
 
@@ -21,6 +21,13 @@ text follows too.
 - **Keys** travel as physical positions (USB HID codes), and each computer applies its
   own keyboard layout. With ABNT2 on both sides, everything matches. By default Ctrl and
   Cmd are swapped between Windows and macOS, so Ctrl+C on the PC does Cmd+C on the Mac.
+- **Clipboard**: what you copied travels when the cursor crosses. Text and images go
+  as they are; copied files (up to 500 MB in total) arrive ready to paste.
+- **Dragging files**: drag files in Explorer or Finder against the edge and keep
+  pushing; they cross with the cursor, and letting go drops them wherever you point on
+  the other computer: a folder, the desktop, an app. If you let go before they
+  arrived, or over something that takes no files, they are saved in Downloads.
+  Transfers ride the same encrypted connection, behind mouse and keyboard input.
 
 A drop of liquid swells on the edge while you push, bursts into ripples when the
 cursor leaves, and splashes where it arrives on the other screen (Settings to turn

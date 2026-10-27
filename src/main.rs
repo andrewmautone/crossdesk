@@ -3,6 +3,7 @@
 mod clipboard;
 mod config;
 mod crypto;
+mod dnd;
 mod effects;
 mod engine;
 mod input;
@@ -11,6 +12,7 @@ mod net;
 mod overlay;
 mod protocol;
 mod state;
+mod transfer;
 #[cfg(any(windows, target_os = "macos"))]
 mod tray;
 mod ui;
@@ -74,6 +76,8 @@ fn main() -> eframe::Result<()> {
             });
         }
     }
+    transfer::start(shared.clone());
+    dnd::start(shared.clone());
     net::start(shared.clone());
     shared.watch_monitors();
     input::start_capture(shared.clone());

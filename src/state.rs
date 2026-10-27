@@ -26,6 +26,8 @@ pub struct PeerInfo {
     pub name: String,
     pub os: String,
     pub monitors: Vec<Monitor>,
+    /// Their build, once their `Info` arrived.
+    pub build: Option<u64>,
 }
 
 pub struct IncomingPair {
@@ -133,6 +135,8 @@ impl Shared {
             registry.clone(),
             clipboard.clone(),
         );
+        // Test instances (ephemeral configs) keep out of the real log.
+        let log_file = (!config.ephemeral).then(open_log_file).flatten();
         let shared = Arc::new(Shared {
             rt,
             config: Mutex::new(config),
@@ -154,7 +158,7 @@ impl Shared {
             update_status: Mutex::new(String::new()),
             remote_cursor: Mutex::new(None),
             key_diag: Mutex::new(KeyDiag::default()),
-            log_file: Mutex::new(open_log_file()),
+            log_file: Mutex::new(log_file),
         });
         shared.rebuild_world();
         shared
@@ -486,6 +490,7 @@ impl Shared {
                     p.name = name.clone();
                     p.os = os.clone();
                     p.monitors = monitors;
+                    p.build = Some(build);
                 }
                 let mut c = self.config.lock();
                 if let Some(t) = c.trusted.get_mut(peer) {
@@ -550,6 +555,7 @@ impl Shared {
                         injector.move_abs(park.0, park.1);
                     }
                     drop(injector);
+                    crate::dnd::controller_released(peer);
                     if self.config.lock().settings.clipboard_sync {
                         self.clipboard.send_to(peer);
                     }
@@ -561,7 +567,14 @@ impl Shared {
                 self.injector.lock().move_abs(x, y)
             }
             Msg::MouseButton { button, down } if self.is_controller(peer) => {
+                if button == crate::protocol::Button::Left && !down {
+                    crate::dnd::controller_released(peer);
+                }
                 self.injector.lock().button(button, down)
+            }
+            Msg::DragStart { id } if self.is_controller(peer) => crate::dnd::drag_start(peer, id),
+            msg @ (Msg::Offer(_) | Msg::Chunk { .. } | Msg::TransferEnd { .. }) => {
+                crate::transfer::incoming(peer, msg)
             }
             Msg::Wheel { dx, dy } if self.is_controller(peer) => {
                 let (dx, dy) = if self.config.lock().settings.invert_scroll {

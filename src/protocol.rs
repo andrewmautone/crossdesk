@@ -86,9 +86,53 @@ pub enum Msg {
     Clipboard(String),
     /// The sender removed its trust in the receiver.
     Unpair,
-    /// A diagnostic line for the other machine's log (kept last: bincode
-    /// numbers variants in order).
+    /// A diagnostic line for the other machine's log.
     Diag(String),
+    // New variants go below: bincode numbers them in order, and a build that
+    // does not know one drops the connection (see `transfer::supports`).
+    /// Files or an image follow as `Chunk`s, item by item, then `TransferEnd`.
+    Offer(Offer),
+    Chunk {
+        id: u64,
+        data: Vec<u8>,
+    },
+    /// Every byte was sent (`ok`), or the sender gave up.
+    TransferEnd {
+        id: u64,
+        ok: bool,
+    },
+    /// Sent with `Enter` when the cursor arrives dragging files: the left
+    /// button is held, and its release is the drop. The files follow as the
+    /// `Drag` transfer with this id.
+    DragStart {
+        id: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransferKind {
+    /// A copied image, as a single PNG item.
+    ClipImage,
+    /// Copied files: ready to paste once they arrive.
+    ClipFiles,
+    /// Files dragged across with the left button held; the drop is the button release.
+    Drag,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Offer {
+    pub id: u64,
+    pub kind: TransferKind,
+    /// Folders first, then files, in the order their bytes follow.
+    pub items: Vec<Item>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Item {
+    /// Relative, `/`-separated; top-level items have no `/`.
+    pub path: String,
+    pub size: u64,
+    pub dir: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

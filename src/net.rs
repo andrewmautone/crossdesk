@@ -16,11 +16,15 @@ use tokio::time::timeout;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const CODE_TIMEOUT: Duration = Duration::from_secs(120);
+/// File chunks waiting to be written; small, so input never queues behind much data.
+const BULK_QUEUE: usize = 4;
 
 struct Conn {
     id: u64,
     preferred: bool,
     tx: mpsc::UnboundedSender<Msg>,
+    /// Transfers, written only when no input is waiting.
+    bulk: mpsc::Sender<Msg>,
     kill: Arc<Notify>,
 }
 
@@ -37,6 +41,13 @@ impl Registry {
             .lock()
             .get(peer)
             .is_some_and(|c| c.tx.send(msg).is_ok())
+    }
+
+    /// Queue transfer data, waiting while the connection is busy. Call it from a
+    /// plain thread, never from the input hooks or the async runtime.
+    pub fn send_bulk(&self, peer: &str, msg: Msg) -> bool {
+        let bulk = self.conns.lock().get(peer).map(|c| c.bulk.clone());
+        bulk.is_some_and(|b| b.blocking_send(msg).is_ok())
     }
 
     pub fn broadcast(&self, msg: Msg) {
@@ -64,7 +75,7 @@ impl Registry {
         preferred: bool,
         tx: mpsc::UnboundedSender<Msg>,
         kill: Arc<Notify>,
-    ) -> Option<u64> {
+    ) -> Option<(u64, mpsc::Receiver<Msg>)> {
         let mut conns = self.conns.lock();
         if let Some(old) = conns.get(peer) {
             if old.preferred || !preferred {
@@ -73,16 +84,18 @@ impl Registry {
             old.kill.notify_one();
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (bulk, bulk_rx) = mpsc::channel(BULK_QUEUE);
         conns.insert(
             peer.to_string(),
             Conn {
                 id,
                 preferred,
                 tx,
+                bulk,
                 kill,
             },
         );
-        Some(id)
+        Some((id, bulk_rx))
     }
 
     /// Returns true if this connection was the registered one.
@@ -383,7 +396,7 @@ async fn run_session(
     };
     let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
     let kill = Arc::new(Notify::new());
-    let Some(conn_id) = shared
+    let Some((conn_id, mut bulk_rx)) = shared
         .registry
         .register(&peer_id, preferred, tx.clone(), kill.clone())
     else {
@@ -391,9 +404,19 @@ async fn run_session(
     };
     shared.log(format!("connected to {peer_name} ({addr})"));
 
+    // A small send buffer keeps input from queueing behind megabytes of file
+    // data in the kernel during a transfer.
+    let _ = socket2::SockRef::from(&stream).set_send_buffer_size(256 * 1024);
     let (mut rd, mut wr): (OwnedReadHalf, OwnedWriteHalf) = stream.into_split();
     let writer = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        loop {
+            // Input first; transfer chunks only fill the gaps.
+            let msg = tokio::select! {
+                biased;
+                m = rx.recv() => m,
+                Some(m) = bulk_rx.recv() => Some(m),
+            };
+            let Some(msg) = msg else { break };
             let Ok(data) = bincode::serialize(&msg) else {
                 continue;
             };
@@ -410,6 +433,7 @@ async fn run_session(
             name: peer_name.clone(),
             os: peer_os.clone(),
             monitors: Vec::new(),
+            build: None,
         },
     );
     let _ = tx.send(shared.info_msg());
@@ -709,6 +733,75 @@ mod tests {
         })
         .await;
         assert!(!a.config.lock().trusted.contains_key(&b_id));
+    }
+
+    async fn paired() -> (Arc<Shared>, Arc<Shared>, String, String) {
+        let (a, _) = peer_with_listener("A").await;
+        let (b, addr_b) = peer_with_listener("B").await;
+        let a_id = a.config.lock().id.clone();
+        let b_id = b.config.lock().id.clone();
+        start_pair(&a, addr_b);
+        let code = wait_for("code on B", || {
+            b.incoming_pair.lock().as_ref().map(|p| p.code.clone())
+        })
+        .await;
+        let tx = wait_for("code prompt on A", || {
+            a.outgoing_pair
+                .lock()
+                .as_mut()
+                .and_then(|p| p.code_tx.take())
+        })
+        .await;
+        tx.send(code).unwrap();
+        wait_for("connection", || {
+            (a.registry.is_connected(&b_id) && b.registry.is_connected(&a_id)).then_some(())
+        })
+        .await;
+        (a, b, a_id, b_id)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn files_cross_while_input_keeps_flowing() {
+        use crate::protocol::TransferKind;
+        let (a, b, a_id, _b_id) = paired().await;
+        crate::transfer::start(b.clone());
+
+        // A folder with a 3 MB file (many chunks), an empty file and a subfolder.
+        let src = std::env::temp_dir().join(format!("crossdesk-src-{}", rand::random::<u32>()));
+        std::fs::create_dir_all(src.join("photos/sub")).unwrap();
+        let big: Vec<u8> = (0..3 * 1024 * 1024u32).map(|i| (i * 7 % 251) as u8).collect();
+        std::fs::write(src.join("photos/big.bin"), &big).unwrap();
+        std::fs::write(src.join("photos/sub/empty.txt"), b"").unwrap();
+        std::fs::write(src.join("note.txt"), b"hello").unwrap();
+
+        let id = crate::transfer::new_id();
+        crate::transfer::send_paths(
+            &a_id,
+            id,
+            TransferKind::Drag,
+            vec![src.join("photos"), src.join("note.txt")],
+        );
+        // Input sent mid-transfer still arrives promptly.
+        b.registry.send(&a_id, Msg::Enter { x: 5, y: 5 });
+        wait_for("input during the transfer", || {
+            a.controlled_by.lock().is_some().then_some(())
+        })
+        .await;
+
+        let root = crate::transfer::incoming_root().join(format!("{id:x}"));
+        wait_for("files", || {
+            std::fs::read(root.join("note.txt"))
+                .ok()
+                .filter(|n| n == b"hello")
+                .and_then(|_| std::fs::read(root.join("photos/big.bin")).ok())
+                .filter(|b| b.len() == big.len())
+        })
+        .await;
+        // TransferEnd creates the trailing empty file.
+        wait_for("empty file", || root.join("photos/sub/empty.txt").exists().then_some(())).await;
+        assert_eq!(std::fs::read(root.join("photos/big.bin")).unwrap(), big);
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

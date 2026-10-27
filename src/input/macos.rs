@@ -253,8 +253,13 @@ fn apply(d: Decision) -> bool {
     if let Some(pt) = d.freeze_at {
         KEYS_ANNOUNCED.store(false, Ordering::Relaxed);
         crate::effects::burst(pt, crate::effects::Kind::Leave);
-        // Park the idle cursor away from the edge so the Dock and hover previews let go.
-        let park = super::away_from_edge(pt, &Platform::monitors());
+        // Park the idle cursor away from the edge so the Dock and hover previews let go;
+        // a file drag stays put so it hovers nothing until it is cancelled.
+        let park = if crate::dnd::crossed() {
+            pt
+        } else {
+            super::away_from_edge(pt, &Platform::monitors())
+        };
         warp_to(park.0, park.1, true);
         *FREEZE_PT.lock() = Some(park);
         if !FROZEN.swap(true, Ordering::SeqCst) {
@@ -266,6 +271,26 @@ fn apply(d: Decision) -> bool {
         crate::effects::burst(pt, crate::effects::Kind::Arrive);
     }
     d.block
+}
+
+/// The drag macOS runs for the frozen cursor crossed to another machine and was
+/// dropped there: cancel it here with Escape, then let go of the button.
+pub fn cancel_os_drag() {
+    std::thread::spawn(|| {
+        for down in [true, false] {
+            if let Some(e) = source().and_then(|s| CGEvent::new_keyboard_event(s, 0x35, down).ok()) {
+                post(e);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        let Some(pt) = *FREEZE_PT.lock() else { return };
+        let at = CGPoint::new(pt.0 as f64, pt.1 as f64);
+        if let Some(e) = source().and_then(|s| {
+            CGEvent::new_mouse_event(s, CGEventType::LeftMouseUp, at, CGMouseButton::Left).ok()
+        }) {
+            post(e);
+        }
+    });
 }
 
 /// Put the cursor at `(x, y)` and give it back to the user.
@@ -329,6 +354,9 @@ fn handle(s: &Arc<Shared>, etype: CGEventType, event: &CGEvent) -> bool {
                 }
             }
             drop(engine);
+            if d.probe_drag {
+                crate::dnd::probe_now();
+            }
             let block = apply(d);
             // Belt and braces: if the cursor still drifted while frozen, put it back.
             if FROZEN.load(Ordering::SeqCst) {
@@ -340,8 +368,15 @@ fn handle(s: &Arc<Shared>, etype: CGEventType, event: &CGEvent) -> bool {
             }
             block
         }
-        LeftMouseDown => button(Button::Left, true),
-        LeftMouseUp => button(Button::Left, false),
+        LeftMouseDown => {
+            crate::dnd::note_mouse_down();
+            button(Button::Left, true)
+        }
+        LeftMouseUp => {
+            let block = button(Button::Left, false);
+            crate::dnd::local_released();
+            block
+        }
         RightMouseDown => button(Button::Right, true),
         RightMouseUp => button(Button::Right, false),
         OtherMouseDown => button(other(), true),

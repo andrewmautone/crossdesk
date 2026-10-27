@@ -56,6 +56,8 @@ pub struct Engine {
     held_keys: HashSet<u16>,
     edge: Option<EdgeHit>,
     push: Option<Push>,
+    /// The left button held here is dragging files (found by `crate::dnd`).
+    file_drag: bool,
 }
 
 fn on_same_edge(e: &EdgeHit, pt: (i32, i32)) -> bool {
@@ -88,6 +90,7 @@ impl Engine {
             held_keys: HashSet::new(),
             edge: None,
             push: None,
+            file_drag: false,
         }
     }
 
@@ -115,6 +118,10 @@ impl Engine {
 
     pub fn active_target(&self) -> Option<&str> {
         self.remote.as_ref().map(|r| r.target.as_str())
+    }
+
+    pub fn set_file_drag(&mut self, on: bool) {
+        self.file_drag = on;
     }
 
     pub fn set_locked(&mut self, locked: bool) {
@@ -219,6 +226,12 @@ impl Engine {
         if self.settings.clipboard_sync {
             self.clipboard.send_to(&machine);
         }
+        let dragging_files = std::mem::take(&mut self.file_drag);
+        if dragging_files {
+            if let Some(id) = crate::dnd::outgoing(&machine) {
+                self.registry.send(&machine, Msg::DragStart { id });
+            }
+        }
         self.remote = Some(Remote {
             target: machine,
             monitor: j,
@@ -226,12 +239,17 @@ impl Engine {
             return_pt: pt,
         });
         self.remote_buttons.clear();
+        if dragging_files {
+            // The button stays down over there; releasing it is the drop.
+            self.remote_buttons.insert(Button::Left);
+        }
         self.edge = None;
         self.push = None;
         Decision {
             block: true,
             freeze_at: Some(pt),
             release_to: None,
+            probe_drag: false,
         }
     }
 
@@ -299,7 +317,13 @@ impl Engine {
     }
 
     fn local_edge(&mut self, pt: (i32, i32)) -> Decision {
-        if !self.settings.edge_switch || self.locked || !self.local_buttons.is_empty() {
+        if !self.settings.edge_switch || self.locked {
+            return Decision::default();
+        }
+        // Only a file drag (left button alone) may cross while a button is held.
+        let held = !self.local_buttons.is_empty();
+        let left_only = self.local_buttons.len() == 1 && self.local_buttons.contains(&Button::Left);
+        if held && !(left_only && self.settings.drag_files) {
             return Decision::default();
         }
         let Some((idx, cpos)) = self.world.locate_native(&self.local_id, pt) else {
@@ -325,6 +349,16 @@ impl Engine {
             let machine = self.world.monitors[j].machine.clone();
             if machine == self.local_id || !self.registry.is_connected(&machine) {
                 continue;
+            }
+            if held && !crate::transfer::supports(&machine) {
+                continue;
+            }
+            if held && !self.file_drag {
+                // Ask the platform whether this drag carries files.
+                return Decision {
+                    probe_drag: true,
+                    ..Decision::default()
+                };
             }
             if self.resistance() <= 0.0 {
                 return self.enter_remote(j, entry, pt);
@@ -381,6 +415,7 @@ impl Engine {
                 block: true,
                 freeze_at: None,
                 release_to: Some(to),
+                probe_drag: false,
             };
         }
         if machine != r.target {
@@ -453,6 +488,9 @@ impl Engine {
                     self.local_buttons.insert(b);
                 } else {
                     self.local_buttons.remove(&b);
+                    if self.local_buttons.is_empty() {
+                        self.file_drag = false;
+                    }
                 }
                 false
             }
@@ -499,6 +537,7 @@ impl Engine {
                         block: true,
                         freeze_at: None,
                         release_to: Some(pt),
+                        probe_drag: false,
                     };
                 }
             }
@@ -621,6 +660,36 @@ mod tests {
         e.on_key(HOTKEY_LOCK, false);
         assert!(e.is_locked());
         assert!(!e.on_move((1919, 500), None).block);
+    }
+
+    #[test]
+    fn a_file_drag_crosses_and_holds_the_button_over_there() {
+        let (mut e, mut rx) = setup();
+        e.on_button(Button::Left, true);
+        // A plain drag at the edge only asks whether it carries files.
+        let d = e.on_move((1919, 500), None);
+        assert!(d.probe_drag && !d.block && e.active_target().is_none());
+        e.set_file_drag(true);
+        let d = e.on_move((1919, 500), None);
+        assert!(d.block && d.freeze_at.is_some());
+        assert_eq!(e.active_target(), Some("mac"));
+        drain(&mut rx);
+        // Cannot come back mid-drag; the release goes over as the drop.
+        e.on_move((0, 0), Some((-500.0, 0.0)));
+        assert_eq!(e.active_target(), Some("mac"));
+        drain(&mut rx);
+        assert!(e.on_button(Button::Left, false));
+        assert!(matches!(
+            drain(&mut rx).as_slice(),
+            [Msg::MouseButton {
+                button: Button::Left,
+                down: false
+            }]
+        ));
+        // A right-button drag never crosses.
+        let (mut e, _rx) = setup();
+        e.on_button(Button::Right, true);
+        assert_eq!(e.on_move((1919, 500), None), Decision::default());
     }
 
     #[test]

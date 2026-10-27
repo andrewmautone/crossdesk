@@ -136,7 +136,12 @@ fn apply(d: Decision) -> bool {
     if let Some(pt) = d.freeze_at {
         KEYS_ANNOUNCED.store(false, Ordering::Relaxed);
         crate::effects::burst(pt, crate::effects::Kind::Leave);
-        let park = park_point(pt);
+        // A file drag stays over the drop target that ends it later (see `crate::dnd`).
+        let park = if crate::dnd::crossed() {
+            pt
+        } else {
+            park_point(pt)
+        };
         *PARK.lock() = Some(park);
         unsafe {
             let _ = SetCursorPos(park.0, park.1);
@@ -251,10 +256,17 @@ fn handle_mouse(msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
                 d = engine.on_edge_dwell();
             }
             drop(engine);
+            if d.probe_drag {
+                crate::dnd::probe(pt);
+            }
             apply(d)
         }
         WM_LBUTTONDOWN => button(Button::Left, true),
-        WM_LBUTTONUP => button(Button::Left, false),
+        WM_LBUTTONUP => {
+            let block = button(Button::Left, false);
+            crate::dnd::local_released();
+            block
+        }
         WM_RBUTTONDOWN => button(Button::Right, true),
         WM_RBUTTONUP => button(Button::Right, false),
         WM_MBUTTONDOWN => button(Button::Middle, true),
