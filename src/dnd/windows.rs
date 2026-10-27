@@ -349,7 +349,11 @@ mod tests {
         unsafe {
             OleInitialize(None).unwrap();
             let data = data_object(&paths).unwrap();
-            assert_eq!(dropped_files(&data).unwrap(), paths);
+            // The shell may hand back short (8.3) names for the same files.
+            let canon = |v: Vec<PathBuf>| -> Vec<PathBuf> {
+                v.iter().map(|p| std::fs::canonicalize(p).unwrap()).collect()
+            };
+            assert_eq!(canon(dropped_files(&data).unwrap()), canon(paths.clone()));
         }
         let _ = std::fs::remove_dir_all(dir);
     }
