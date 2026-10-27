@@ -43,6 +43,13 @@ static START: OnceLock<Instant> = OnceLock::new();
 // call is too slow) or an elevated window has the focus.
 static HINST: AtomicIsize = AtomicIsize::new(0);
 static KBD_HOOK: AtomicIsize = AtomicIsize::new(0);
+static MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
+// Mouse watchdog, the same idea: physical movement that never reaches the
+// hook means Windows dropped it, and a cursor parked for another machine
+// would then be invisible on both.
+static LAST_HOOK_MOUSE: AtomicU64 = AtomicU64::new(0);
+static LAST_RAW_MOUSE: AtomicU64 = AtomicU64::new(0);
+static MOUSE_MISSING: AtomicBool = AtomicBool::new(false);
 static LAST_HOOK_KEY: AtomicU64 = AtomicU64::new(0);
 static LAST_RAW_KEY: AtomicU64 = AtomicU64::new(0);
 static LAST_REINSTALL: AtomicU64 = AtomicU64::new(0);
@@ -66,6 +73,10 @@ pub fn init_process() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
+    // A previous copy that died while another machine had the cursor left the
+    // system cursors blank; put them back.
+    HIDDEN.store(true, Ordering::SeqCst);
+    show_cursor();
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         show_cursor();
@@ -99,6 +110,9 @@ pub fn start_capture(shared: Arc<Shared>) {
             }
             if let Ok(h) = kbd {
                 KBD_HOOK.store(h.0 as isize, Ordering::SeqCst);
+            }
+            if let Ok(h) = mouse {
+                MOUSE_HOOK.store(h.0 as isize, Ordering::SeqCst);
             }
             if let Err(e) = raw_input_window(hinst) {
                 shared.log(format!(
@@ -231,6 +245,9 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         let started = Instant::now();
         let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
         let injected = info.flags & LLMHF_INJECTED != 0 || info.dwExtraInfo == MAGIC;
+        if !injected {
+            LAST_HOOK_MOUSE.store(now_ms(), Ordering::Relaxed);
+        }
         let block = !injected && handle_mouse(wparam.0 as u32, info);
         check_slow("mouse", started);
         if block {
@@ -493,6 +510,63 @@ fn check_keyboard_hook() {
     }
 }
 
+/// Called every second on the hook thread: raw input saw the mouse move (or
+/// click) but the hook did not. Put the hook back, and if another machine had
+/// the cursor, bring it home and visible.
+fn check_mouse_hook() {
+    let Some(s) = shared() else { return };
+    let (raw, hook, now) = (
+        LAST_RAW_MOUSE.load(Ordering::Relaxed),
+        LAST_HOOK_MOUSE.load(Ordering::Relaxed),
+        now_ms(),
+    );
+    if raw == 0 || now - raw < 300 || raw <= hook + 500 {
+        // No movement yet, the hook may still run, or it is keeping up.
+        if hook > raw {
+            MOUSE_MISSING.store(false, Ordering::Relaxed);
+        }
+        return;
+    }
+    let first = !MOUSE_MISSING.swap(true, Ordering::Relaxed);
+    unsafe {
+        let old = MOUSE_HOOK.load(Ordering::SeqCst);
+        if old != 0 {
+            let _ = UnhookWindowsHookEx(HHOOK(old as _));
+        }
+        let hinst = HINSTANCE(HINST.load(Ordering::SeqCst) as _);
+        match SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hinst, 0) {
+            Ok(h) => MOUSE_HOOK.store(h.0 as isize, Ordering::SeqCst),
+            Err(e) => s.diag(format!("mouse hook reinstall failed: {e}")),
+        }
+    }
+    // Count from now, so one missed stretch is handled once.
+    LAST_HOOK_MOUSE.store(now, Ordering::Relaxed);
+    let back = s.engine.lock().force_local();
+    match back {
+        Some(pt) => {
+            warp(pt.0, pt.1);
+            s.diag("mouse hook stopped receiving the mouse; reinstalled it and brought the cursor back");
+        }
+        None => {
+            // Not driving another machine; just make sure nothing stays hidden.
+            *PARK.lock() = None;
+            show_cursor();
+            if first {
+                let fg = foreground_process().map_or_else(|| "unknown".into(), |(n, e)| {
+                    if e {
+                        format!("{n} (administrator)")
+                    } else {
+                        n
+                    }
+                });
+                s.diag(format!(
+                    "mouse hook stopped receiving the mouse (focused app: {fg}); reinstalled it"
+                ));
+            }
+        }
+    }
+}
+
 /// A message-only window that receives raw mouse movement. Unlike the hook,
 /// raw input keeps reporting motion while the cursor is pinned on a screen edge,
 /// which is what measures the push needed to cross.
@@ -561,6 +635,7 @@ unsafe extern "system" fn raw_input_proc(
         // Nothing in the UI reads raw keys, so the keyboard is simply kept.
         claim_raw_input(hwnd, 0x06);
         check_keyboard_hook();
+        check_mouse_hook();
     }
     if msg == WM_INPUT && !RAW_SEEN.swap(true, Ordering::Relaxed) {
         if let Some(s) = shared() {
@@ -593,6 +668,7 @@ unsafe fn handle_raw(handle: HRAWINPUT) {
     if raw.header.dwType != RIM_TYPEMOUSE.0 {
         return;
     }
+    LAST_RAW_MOUSE.store(now_ms(), Ordering::Relaxed);
     if PARK.lock().is_some() {
         return; // another machine has the cursor; the hook measures movement then
     }
