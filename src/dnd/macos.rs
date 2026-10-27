@@ -12,7 +12,7 @@ use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use parking_lot::Mutex;
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicIsize, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -25,7 +25,10 @@ const NS_DRAG_OPERATION_COPY: usize = 1;
 static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
 /// Drag pasteboard change count when the left button went down.
 static COUNT_AT_DOWN: AtomicIsize = AtomicIsize::new(-1);
+/// When the drag pasteboard was last read; 0 = not during this press.
 static LAST_PROBE_MS: AtomicU64 = AtomicU64::new(0);
+/// Reported what the probe found during this press.
+static PROBE_REPORTED: AtomicBool = AtomicBool::new(false);
 static START: OnceLock<Instant> = OnceLock::new();
 /// Files waiting for the injected press that starts their drag.
 static BEGIN: Mutex<Option<Vec<PathBuf>>> = Mutex::new(None);
@@ -66,26 +69,42 @@ pub fn note_mouse_down() {
 /// machine. If Finder put files on the drag pasteboard since the press, it is a file drag.
 pub fn probe_now() {
     let now = now_ms();
-    if now - LAST_PROBE_MS.load(Ordering::Relaxed) < 200 || !super::enabled() {
+    let last = LAST_PROBE_MS.load(Ordering::Relaxed);
+    if (last != 0 && now - last < 200) || !super::enabled() {
         return;
     }
     LAST_PROBE_MS.store(now, Ordering::Relaxed);
+    let mut report = String::new();
     let files = autoreleasepool(|_| unsafe {
         let pb = drag_pasteboard();
         if pb.is_null() {
+            report = "no drag pasteboard".into();
             return None;
         }
         let count: isize = msg_send![pb, changeCount];
-        if count == COUNT_AT_DOWN.load(Ordering::SeqCst) {
-            return None; // not a drag that wrote anything: text selection, window move
+        let at_down = COUNT_AT_DOWN.load(Ordering::SeqCst);
+        if count == at_down {
+            // Not a drag that wrote anything: text selection, window move.
+            report = format!("drag pasteboard unchanged since the press ({count})");
+            return None;
         }
         let items: *mut AnyObject = msg_send![pb, pasteboardItems];
         if items.is_null() {
+            report = "drag pasteboard has no items".into();
             return None;
         }
         let n: usize = msg_send![items, count];
         let file_url = NSString::from_str("public.file-url");
         let mut out = Vec::new();
+        report = format!("{n} item(s), change {at_down} -> {count}");
+        if n > 0 {
+            let first: *mut AnyObject = msg_send![items, objectAtIndex: 0usize];
+            let types: *mut AnyObject = msg_send![first, types];
+            let desc: *mut NSString = msg_send![types, description];
+            if let Some(d) = desc.as_ref() {
+                report.push_str(&format!(", types {}", d.to_string().replace('\n', " ")));
+            }
+        }
         for i in 0..n {
             let item: *mut AnyObject = msg_send![items, objectAtIndex: i];
             let s: *mut NSString = msg_send![item, stringForType: &*file_url];
@@ -106,6 +125,10 @@ pub fn probe_now() {
         }
         Some(out)
     });
+    if !PROBE_REPORTED.swap(true, Ordering::Relaxed) {
+        let found = files.as_ref().map_or(0, Vec::len);
+        super::diag(format!("drag at the edge: {found} file(s); {report}"));
+    }
     if files.is_some() {
         super::set_local(files);
     }
@@ -113,6 +136,7 @@ pub fn probe_now() {
 
 pub fn local_drag_over(crossed: bool) {
     LAST_PROBE_MS.store(0, Ordering::Relaxed);
+    PROBE_REPORTED.store(false, Ordering::Relaxed);
     COUNT_AT_DOWN.store(-1, Ordering::SeqCst);
     if crossed {
         crate::input::cancel_os_drag();
@@ -175,6 +199,7 @@ pub fn begin_drag(paths: Vec<PathBuf>) {
     std::thread::spawn(|| {
         std::thread::sleep(Duration::from_millis(1500));
         if BEGIN.lock().is_some() {
+            super::diag("drop: the injected press never reached the drag panel");
             on_main(|| unsafe { give_up() });
         }
     });
@@ -301,6 +326,7 @@ extern "C" fn mouse_down(this: *mut AnyObject, _sel: Sel, event: *mut AnyObject)
         }
         let n: usize = msg_send![items, count];
         if n == 0 {
+            super::diag("drop: no dragging items could be made");
             hide_panel();
             if let Some(s) = SHARED.get() {
                 s.injector.lock().button(Button::Left, false);
@@ -309,8 +335,9 @@ extern "C" fn mouse_down(this: *mut AnyObject, _sel: Sel, event: *mut AnyObject)
             return;
         }
         *FLIGHT.lock() = Some(paths);
-        let _: *mut AnyObject =
+        let session: *mut AnyObject =
             msg_send![this, beginDraggingSessionWithItems: items, event: event, source: this];
+        super::diag(format!("drop: drag session started: {}", !session.is_null()));
     }
 }
 
@@ -322,6 +349,7 @@ extern "C" fn ended(
     operation: usize,
 ) {
     unsafe { hide_panel() };
+    super::diag(format!("drop: drag session ended, operation {operation}"));
     if let Some(paths) = FLIGHT.lock().take() {
         super::drag_finished(paths, operation != 0);
     }

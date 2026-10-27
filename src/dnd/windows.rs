@@ -33,6 +33,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 const WM_PROBE: u32 = WM_APP + 1;
 const WM_PROBE_DONE: u32 = WM_APP + 2;
 const WM_BEGIN: u32 = WM_APP + 3;
+const WM_RELEASE: u32 = WM_APP + 4;
 const TIMER_HIDE: usize = 1;
 const TIMER_GIVE_UP: usize = 2;
 /// Side of the invisible windows, in pixels.
@@ -146,18 +147,17 @@ pub fn probe(pt: (i32, i32)) {
     }
 }
 
+/// Hook thread: the physical button went up.
 pub fn local_drag_over(crossed: bool) {
     let probed = PROBED.swap(false, Ordering::SeqCst);
-    if crossed {
-        // The cursor is parked on our drop target: releasing there ends the
-        // Explorer drag with nothing dropped.
-        Platform.button(Button::Left, false);
-    }
     if !probed && !crossed {
         return;
     }
+    // Not from here: input injected inside a hook call waits for that same
+    // hook, which stalls until Windows times it out (and may drop the hook).
+    let msg = if crossed { WM_RELEASE } else { WM_PROBE_DONE };
     unsafe {
-        let _ = PostMessageW(hwnd(&TARGET), WM_PROBE_DONE, WPARAM(0), LPARAM(0));
+        let _ = PostMessageW(hwnd(&TARGET), msg, WPARAM(0), LPARAM(0));
     }
 }
 
@@ -181,6 +181,13 @@ unsafe extern "system" fn target_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             p.move_abs(pt.0 - 1, pt.1);
             p.move_abs(pt.0 + 1, pt.1);
             p.move_abs(pt.0, pt.1);
+            LRESULT(0)
+        }
+        WM_RELEASE => {
+            // The cursor is parked on this drop target: releasing here ends the
+            // Explorer drag with nothing dropped.
+            Platform.button(Button::Left, false);
+            SetTimer(h, TIMER_HIDE, 400, None);
             LRESULT(0)
         }
         WM_PROBE_DONE => {
@@ -218,6 +225,7 @@ unsafe extern "system" fn source_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             let effect = data_object(&paths)
                 .and_then(|data| SHDoDragDrop(h, &data, None::<&IDropSource>, DROPEFFECT_COPY));
             let _ = ShowWindow(h, SW_HIDE);
+            super::diag(format!("drop: drag ended with {effect:?}"));
             let dropped = effect.is_ok_and(|e| e != DROPEFFECT_NONE);
             super::drag_finished(paths, dropped);
             LRESULT(0)
@@ -227,6 +235,7 @@ unsafe extern "system" fn source_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             let _ = KillTimer(h, TIMER_GIVE_UP);
             let _ = ShowWindow(h, SW_HIDE);
             if let Some(paths) = BEGIN.lock().take() {
+                super::diag("drop: the injected press never reached the drag window");
                 if let Some(s) = SHARED.get() {
                     s.injector.lock().button(Button::Left, false);
                 }
@@ -298,6 +307,10 @@ impl IDropTarget_Impl for DropTarget_Impl {
     ) -> windows::core::Result<()> {
         let files = data.and_then(|d| unsafe { dropped_files(d) });
         let any = files.as_ref().is_some_and(|f| !f.is_empty());
+        super::diag(format!(
+            "drag at the edge carries {} file(s)",
+            files.as_ref().map_or(0, Vec::len)
+        ));
         super::set_local(files);
         unsafe {
             *effect = if any { DROPEFFECT_COPY } else { DROPEFFECT_NONE };

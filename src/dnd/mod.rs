@@ -60,6 +60,13 @@ pub fn start(shared: Arc<Shared>) {
     platform::start(shared);
 }
 
+/// Drag diagnostics, here and in the other machine's log.
+fn diag(msg: impl Into<String>) {
+    if let Some(s) = SHARED.get() {
+        s.diag(msg);
+    }
+}
+
 fn enabled() -> bool {
     SHARED
         .get()
@@ -136,10 +143,14 @@ pub fn arrived(peer: &str, id: u64, paths: Option<Vec<PathBuf>>) {
         }
         return;
     };
-    let still_held = mine
-        && !inc.as_ref().unwrap().released
-        && s.controlled_by.lock().as_deref() == Some(peer);
+    let released = inc.as_ref().is_some_and(|i| i.released);
+    let in_control = s.controlled_by.lock().as_deref() == Some(peer);
+    let still_held = mine && !released && in_control;
     if !still_held {
+        diag(format!(
+            "drop: files arrived after the drag ended (known drag: {mine}, \
+             released: {released}, still in control: {in_control}); saving them"
+        ));
         if mine {
             *inc = None;
         }
