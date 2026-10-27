@@ -315,7 +315,9 @@ fn handle_mouse(msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
                 .map(|p| ((pt.0 - p.0) as f64, (pt.1 - p.1) as f64));
             let mut engine = s.engine.lock();
             let mut d = engine.on_move(pt, delta);
-            if delta.is_none() && d == Decision::default() && !raw_alive() {
+            // Resting on the edge counts as the push only where raw input never
+            // worked: an idle mouse's jitter must not send the cursor across.
+            if delta.is_none() && d == Decision::default() && !RAW_SEEN.load(Ordering::Relaxed) {
                 d = engine.on_edge_dwell();
             }
             drop(engine);

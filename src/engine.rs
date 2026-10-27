@@ -42,6 +42,11 @@ struct Push {
 
 /// A pause this long while pushing starts the count over.
 const PUSH_RESET: Duration = Duration::from_millis(450);
+/// While another machine moved our cursor this recently, the local mouse cannot
+/// cross: control arrives with the cursor on the edge next to that machine, and
+/// the slightest jitter of the idle local mouse would otherwise send it back,
+/// hiding the cursor here and leaving the other machine's mouse loose.
+const CONTROLLED_QUIET: Duration = Duration::from_millis(1500);
 
 pub struct Engine {
     local_id: String,
@@ -58,6 +63,8 @@ pub struct Engine {
     push: Option<Push>,
     /// The left button held here is dragging files (found by `crate::dnd`).
     file_drag: bool,
+    /// Last input another machine sent while controlling this one.
+    controlled_input: Option<Instant>,
 }
 
 fn on_same_edge(e: &EdgeHit, pt: (i32, i32)) -> bool {
@@ -91,6 +98,7 @@ impl Engine {
             edge: None,
             push: None,
             file_drag: false,
+            controlled_input: None,
         }
     }
 
@@ -118,6 +126,16 @@ impl Engine {
 
     pub fn active_target(&self) -> Option<&str> {
         self.remote.as_ref().map(|r| r.target.as_str())
+    }
+
+    /// Another machine just moved, clicked or typed here.
+    pub fn note_controlled_input(&mut self) {
+        self.controlled_input = Some(Instant::now());
+    }
+
+    fn controlled_recently(&self) -> bool {
+        self.controlled_input
+            .is_some_and(|t| t.elapsed() < CONTROLLED_QUIET)
     }
 
     pub fn set_file_drag(&mut self, on: bool) {
@@ -318,6 +336,11 @@ impl Engine {
 
     fn local_edge(&mut self, pt: (i32, i32)) -> Decision {
         if !self.settings.edge_switch || self.locked {
+            return Decision::default();
+        }
+        if self.controlled_recently() {
+            self.edge = None;
+            self.push = None;
             return Decision::default();
         }
         // Only a file drag (left button alone) may cross while a button is held.
@@ -690,6 +713,19 @@ mod tests {
         let (mut e, _rx) = setup();
         e.on_button(Button::Right, true);
         assert_eq!(e.on_move((1919, 500), None), Decision::default());
+    }
+
+    #[test]
+    fn local_jitter_cannot_cross_while_the_other_machine_drives() {
+        let (mut e, _rx) = setup();
+        e.note_controlled_input();
+        // The other machine left our cursor on the edge next to it.
+        assert_eq!(e.on_move((1919, 500), None), Decision::default());
+        assert!(e.active_target().is_none());
+        // Once it has been quiet for a while, the local mouse crosses as usual.
+        e.controlled_input = Some(Instant::now() - CONTROLLED_QUIET);
+        assert!(e.on_move((1919, 500), None).block);
+        assert_eq!(e.active_target(), Some("mac"));
     }
 
     #[test]

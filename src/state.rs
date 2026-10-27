@@ -530,6 +530,7 @@ impl Shared {
                     input::warp(x, y);
                 }
                 *self.controlled_by.lock() = Some(peer.to_string());
+                self.engine.lock().note_controlled_input();
                 *self.key_diag.lock() = KeyDiag::default();
                 *self.remote_cursor.lock() = Some((x, y));
                 self.injector.lock().move_abs(x, y);
@@ -563,10 +564,12 @@ impl Shared {
                 }
             }
             Msg::MouseMove { x, y } if self.is_controller(peer) => {
+                self.engine.lock().note_controlled_input();
                 *self.remote_cursor.lock() = Some((x, y));
                 self.injector.lock().move_abs(x, y)
             }
             Msg::MouseButton { button, down } if self.is_controller(peer) => {
+                self.engine.lock().note_controlled_input();
                 if button == crate::protocol::Button::Left && !down {
                     crate::dnd::controller_released(peer);
                 }
@@ -585,6 +588,7 @@ impl Shared {
                 self.injector.lock().wheel(dx, dy)
             }
             Msg::Key { hid, down } if self.is_controller(peer) => {
+                self.engine.lock().note_controlled_input();
                 let swap = self.config.lock().settings.swap_ctrl_cmd && peer_os != this_os();
                 let hid = if swap {
                     keymap::swap_ctrl_meta(hid)
