@@ -92,9 +92,95 @@ unsafe fn window() -> *mut AnyObject {
     win
 }
 
+/// The Liquid Glass drop inside the overlay window, created on first use.
+static GLASS: AtomicPtr<AnyObject> = AtomicPtr::new(std::ptr::null_mut());
+
+fn glass_class() -> Option<&'static objc2::runtime::AnyClass> {
+    objc2::runtime::AnyClass::get("NSGlassEffectView")
+}
+
+unsafe fn glass_view(win: *mut AnyObject) -> *mut AnyObject {
+    let existing = GLASS.load(Ordering::SeqCst);
+    if !existing.is_null() {
+        return existing;
+    }
+    let Some(cls) = glass_class() else {
+        return std::ptr::null_mut();
+    };
+    let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0));
+    let g: *mut AnyObject = msg_send![cls, alloc];
+    let g: *mut AnyObject = msg_send![g, initWithFrame: rect];
+    if g.is_null() {
+        return g;
+    }
+    // NSGlassEffectViewStyleClear: refracts more and frosts less than Regular.
+    let style = objc2::sel!(setStyle:);
+    let responds: Bool = msg_send![g, respondsToSelector: style];
+    if responds.as_bool() {
+        let _: () = msg_send![g, setStyle: 1isize];
+    }
+    let view: *mut AnyObject = msg_send![win, contentView];
+    let _: () = msg_send![view, addSubview: g];
+    GLASS.store(g, Ordering::SeqCst);
+    g
+}
+
+/// Hide the glass drop (the CPU-rendered effect is showing instead).
+unsafe fn hide_glass() {
+    let g = GLASS.load(Ordering::SeqCst);
+    if !g.is_null() {
+        let _: () = msg_send![g, setHidden: Bool::YES];
+    }
+}
+
 pub struct Overlay;
 
 impl Overlay {
+    /// Liquid Glass (macOS 26+) refracts whatever is behind the window on the
+    /// GPU, with no Screen Recording permission and no snapshot.
+    pub fn glass_available() -> bool {
+        glass_class().is_some()
+    }
+
+    /// Show a round glass drop of `radius` (points) centered on `center`.
+    pub fn present_glass(&mut self, center: (i32, i32), logical: f32, radius: f32, alpha: f32) {
+        let logical = logical as f64;
+        let main_h = CGDisplay::main().bounds().size.height;
+        let x = center.0 as f64 - logical / 2.0;
+        let y = main_h - (center.1 as f64 + logical / 2.0);
+        let r = radius.max(0.0) as f64;
+        on_main(move || unsafe {
+            let win = window();
+            if win.is_null() {
+                return;
+            }
+            let g = glass_view(win);
+            if g.is_null() {
+                return;
+            }
+            let view: *mut AnyObject = msg_send![win, contentView];
+            let layer: *mut AnyObject = msg_send![view, layer];
+            if !layer.is_null() {
+                let _: () = msg_send![layer, setContents: std::ptr::null_mut::<AnyObject>()];
+            }
+            let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(logical, logical));
+            let _: () = msg_send![win, setFrame: frame, display: Bool::NO];
+            let drop = NSRect::new(
+                NSPoint::new(logical / 2.0 - r, logical / 2.0 - r),
+                NSSize::new(2.0 * r, 2.0 * r),
+            );
+            let _: () = msg_send![g, setFrame: drop];
+            let corner = objc2::sel!(setCornerRadius:);
+            let responds: Bool = msg_send![g, respondsToSelector: corner];
+            if responds.as_bool() {
+                let _: () = msg_send![g, setCornerRadius: r];
+            }
+            let _: () = msg_send![g, setAlphaValue: alpha.clamp(0.0, 1.0) as f64];
+            let _: () = msg_send![g, setHidden: Bool::from(r < 1.0)];
+            let _: () = msg_send![win, orderFrontRegardless];
+        });
+    }
+
     pub fn new() -> Option<Overlay> {
         Some(Overlay)
     }
@@ -116,6 +202,7 @@ impl Overlay {
             if win.is_null() {
                 return;
             }
+            hide_glass();
             let provider = CGDataProvider::from_buffer(pixels);
             let image = CGImage::new(
                 side,

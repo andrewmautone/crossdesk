@@ -41,6 +41,7 @@ pub struct Snapshot {
 
 /// Logical size of the overlay (pixels at 100% scale / macOS points).
 const SIZE: f32 = 340.0;
+const FRAME: Duration = Duration::from_micros(16_667);
 const BURST: Duration = Duration::from_millis(520);
 const PUSH_FADE: Duration = Duration::from_millis(180);
 const INDIGO: [f32; 3] = [91.0, 75.0, 240.0];
@@ -65,10 +66,12 @@ pub fn start(monitors: impl Fn() -> Vec<Monitor> + Send + 'static, enabled: bool
             let mut push: Option<(Instant, (i32, i32), f32)> = None;
             let mut shown = false;
             let born = Instant::now();
+            // When the next frame is due; rendering time counts toward the 60 fps budget.
+            let mut next_frame = Instant::now();
             loop {
                 let active = burst.is_some() || push.is_some();
                 let wait = if active {
-                    Duration::from_millis(16)
+                    next_frame.saturating_duration_since(Instant::now())
                 } else {
                     Duration::from_secs(1)
                 };
@@ -94,6 +97,10 @@ pub fn start(monitors: impl Fn() -> Vec<Monitor> + Send + 'static, enabled: bool
                         }
                     }
                 }
+                // Pushes arrive with every mouse event; draw no faster than the frame rate.
+                if Instant::now() < next_frame {
+                    continue;
+                }
                 if burst.is_some_and(|(t, _, _)| t.elapsed() >= BURST) {
                     burst = None;
                 }
@@ -112,6 +119,7 @@ pub fn start(monitors: impl Fn() -> Vec<Monitor> + Send + 'static, enabled: bool
                     }
                     continue;
                 };
+                next_frame = Instant::now() + FRAME;
                 let mons = monitors();
                 let (dir, scale) = edge_of(&mons, center);
                 let px_scale = Overlay::pixel_scale(scale);
@@ -127,6 +135,16 @@ pub fn start(monitors: impl Fn() -> Vec<Monitor> + Send + 'static, enabled: bool
                 };
                 if overlay.is_none() {
                     overlay = Overlay::new();
+                }
+                // Liquid Glass refracts the real screen by itself, no snapshot needed.
+                if distort && Overlay::glass_available() {
+                    let (radius, alpha) = glass_drop(&frame);
+                    if let Some(o) = overlay.as_mut() {
+                        o.present_glass(center, SIZE, radius, alpha);
+                        o.pump();
+                        shown = true;
+                    }
+                    continue;
                 }
                 // Grab the screen under the effect when it starts somewhere new.
                 if !distort {
@@ -199,6 +217,23 @@ pub struct Frame {
     pub dir: Dir,
 }
 
+/// Radius (logical px) and opacity of the Liquid Glass drop for this frame:
+/// it swells while pushing, pops outward on leave and lands and melts on arrive.
+pub fn glass_drop(f: &Frame) -> (f32, f32) {
+    let wobble = 1.0 + 0.05 * (f.time * 9.0).sin();
+    if let Some((t, kind)) = f.burst {
+        let ease = 1.0 - (1.0 - t).powi(3);
+        return match kind {
+            Kind::Leave => ((48.0 + 60.0 * ease) * wobble, (1.0 - t).powf(1.5)),
+            Kind::Arrive => (56.0 * (1.0 - ease) * wobble, 1.0 - t),
+        };
+    }
+    match f.push {
+        Some(p) => ((14.0 + 50.0 * p) * wobble, (p * 3.0).min(1.0)),
+        None => (0.0, 0.0),
+    }
+}
+
 fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -223,7 +258,7 @@ pub fn render(side: usize, px_scale: f32, f: &Frame) -> Vec<u8> {
         Dir::Down => (0.0, 1.0),
         Dir::Up => (0.0, -1.0),
     };
-    for y in 0..side {
+    par_rows(&mut out, side, |y, row| {
         for x in 0..side {
             let px = (x as f32 + 0.5 - c) / px_scale;
             let py = (y as f32 + 0.5 - c) / px_scale;
@@ -290,14 +325,22 @@ pub fn render(side: usize, px_scale: f32, f: &Frame) -> Vec<u8> {
             let a = alpha.min(1.0);
             // Premultiplied: color channels already carry alpha; normalize if they overflowed.
             let k = if alpha > 1.0 { 1.0 / alpha } else { 1.0 };
-            let o = (y * side + x) * 4;
-            out[o] = (acc[0] * k).min(255.0 * a) as u8;
-            out[o + 1] = (acc[1] * k).min(255.0 * a) as u8;
-            out[o + 2] = (acc[2] * k).min(255.0 * a) as u8;
-            out[o + 3] = (a * 255.0) as u8;
+            let o = x * 4;
+            row[o] = (acc[0] * k).min(255.0 * a) as u8;
+            row[o + 1] = (acc[1] * k).min(255.0 * a) as u8;
+            row[o + 2] = (acc[2] * k).min(255.0 * a) as u8;
+            row[o + 3] = (a * 255.0) as u8;
         }
-    }
+    });
     out
+}
+
+/// Fill `out` (`side` rows of RGBA) on every core.
+fn par_rows(out: &mut [u8], side: usize, row_fn: impl Fn(usize, &mut [u8]) + Sync) {
+    use rayon::prelude::*;
+    out.par_chunks_mut(side * 4)
+        .enumerate()
+        .for_each(|(y, row)| row_fn(y, row));
 }
 
 fn sample(s: &Snapshot, side: usize, x: f32, y: f32, ch: usize) -> f32 {
@@ -326,7 +369,7 @@ pub fn render_distort(side: usize, px_scale: f32, f: &Frame, snap: &Snapshot) ->
         }
     };
     let light = (-0.6f32, -0.8f32);
-    for y in 0..side {
+    par_rows(&mut out, side, |y, row| {
         for x in 0..side {
             let px = (x as f32 + 0.5 - c) / px_scale;
             let py = (y as f32 + 0.5 - c) / px_scale;
@@ -413,14 +456,14 @@ pub fn render_distort(side: usize, px_scale: f32, f: &Frame, snap: &Snapshot) ->
                 sample(snap, side, bx, by, 2),
             ];
             let a = mask.min(1.0);
-            let o = (y * side + x) * 4;
+            let o = x * 4;
             for ch in 0..3 {
                 let v = (col[ch] * (1.0 + shade) + glint * 255.0).clamp(0.0, 255.0);
-                out[o + ch] = (v * a) as u8;
+                row[o + ch] = (v * a) as u8;
             }
-            out[o + 3] = (a * 255.0) as u8;
+            row[o + 3] = (a * 255.0) as u8;
         }
-    }
+    });
     out
 }
 
@@ -495,6 +538,22 @@ mod tests {
         };
         let max_a = render(64, 0.2, &end).chunks(4).map(|p| p[3]).max().unwrap();
         assert!(max_a < 40, "almost gone at the end ({max_a})");
+    }
+
+    #[test]
+    fn glass_drop_grows_with_the_push_and_fades_after_a_burst() {
+        let frame = |push: Option<f32>, burst: Option<(f32, Kind)>| Frame {
+            time: 0.0,
+            burst,
+            push,
+            dir: Dir::Right,
+        };
+        let small = glass_drop(&frame(Some(0.2), None)).0;
+        let big = glass_drop(&frame(Some(1.0), None)).0;
+        assert!(big > small);
+        assert!(glass_drop(&frame(None, Some((0.999, Kind::Leave)))).1 < 0.01);
+        assert!(glass_drop(&frame(None, Some((0.999, Kind::Arrive)))).0 < 1.0);
+        assert!(glass_drop(&frame(None, Some((0.999, Kind::Leave)))).0 <= SIZE / 2.0);
     }
 
     #[test]

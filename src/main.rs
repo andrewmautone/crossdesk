@@ -52,6 +52,11 @@ fn main() -> eframe::Result<()> {
         fx_on,
         fx_distort,
     );
+    shared.log(if overlay::Overlay::glass_available() {
+        "effects: Liquid Glass"
+    } else {
+        "effects: screen snapshot refraction"
+    });
     if std::env::args().any(|a| a == "--fx-demo") {
         // Plays the effects on the right edge of the main screen, for checking how they look.
         let mons = shared.local_monitors.lock().clone();

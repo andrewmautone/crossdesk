@@ -1,6 +1,14 @@
 pub struct Overlay;
 
 impl Overlay {
+    /// Liquid Glass exists only on macOS.
+    pub fn glass_available() -> bool {
+        false
+    }
+
+    pub fn present_glass(&mut self, _center: (i32, i32), _logical: f32, _radius: f32, _alpha: f32) {
+    }
+
     pub fn new() -> Option<Overlay> {
         None
     }

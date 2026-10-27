@@ -24,6 +24,7 @@ gethostname = "0.4"
 parking_lot = "0.12"
 if-addrs = "0.13"
 png = "0.17"
+rayon = "1"
 ureq = { version = "2", default-features = false, features = ["json", "native-tls"] }
 native-tls = "0.2"
 
