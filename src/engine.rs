@@ -150,6 +150,25 @@ impl Engine {
         self.locked
     }
 
+    /// True if the OS carries the cursor past this edge onto another of our own
+    /// screens. Screens moved apart on the map must not turn that into a crossing.
+    fn local_screen_beyond(&self, pt: (i32, i32), dir: Dir) -> bool {
+        let next = match dir {
+            Dir::Right => (pt.0 + 1, pt.1),
+            Dir::Left => (pt.0 - 1, pt.1),
+            Dir::Down => (pt.0, pt.1 + 1),
+            Dir::Up => (pt.0, pt.1 - 1),
+        };
+        self.world.monitors.iter().any(|m| {
+            let n = &m.native;
+            m.machine == self.local_id
+                && next.0 >= n.x
+                && next.0 < n.x + n.w
+                && next.1 >= n.y
+                && next.1 < n.y + n.h
+        })
+    }
+
     /// A machine's main screen on the canvas.
     fn main_monitor(&self, machine: &str) -> Option<&crate::layout::WorldMonitor> {
         let mons = self.world.monitors.iter().filter(|m| m.machine == machine);
@@ -363,7 +382,7 @@ impl Engine {
             (pt.1 <= n.y && in_x, Dir::Up),
         ];
         for (hit, dir) in edges {
-            if !hit {
+            if !hit || self.local_screen_beyond(pt, dir) {
                 continue;
             }
             let Some((j, entry)) = self.world.neighbor(idx, cpos, dir) else {
@@ -726,6 +745,36 @@ mod tests {
         e.controlled_input = Some(Instant::now() - CONTROLLED_QUIET);
         assert!(e.on_move((1919, 500), None).block);
         assert_eq!(e.active_target(), Some("mac"));
+    }
+
+    #[test]
+    fn an_edge_onto_our_own_screen_never_crosses() {
+        let (mut e, _rx) = setup();
+        let mon = |x, w, h| Monitor {
+            x,
+            y: 0,
+            w,
+            h,
+            primary: x == 0,
+            name: String::new(),
+        };
+        let machines = vec![
+            (
+                "pc".to_string(),
+                vec![mon(0, 1920, 1080), mon(1920, 1920, 1080)],
+            ),
+            ("mac".to_string(), vec![mon(0, 1440, 900)]),
+        ];
+        let mut layout = Layout::default();
+        let at = |x, y| Placement { x, y, scale: 1.0 };
+        layout.placements.insert("pc".into(), at(0.0, 0.0));
+        layout.placements.insert("mac".into(), at(1920.0, 0.0));
+        // On the map the PC's second screen went below; the Mac took its place.
+        layout.shift_screen("pc", &machines[0].1[1], -1920.0, 1080.0);
+        e.set_world(World::build(&machines, &layout));
+        // Windows still continues to the right onto that screen itself.
+        assert_eq!(e.on_move((1919, 500), None), Decision::default());
+        assert!(e.active_target().is_none());
     }
 
     #[test]

@@ -320,7 +320,7 @@ impl Shared {
         self.registry.broadcast(Msg::Layout(layout));
     }
 
-    pub fn snap_layout(&self, mut layout: Layout, moving: &str) -> Layout {
+    pub fn snap_layout(&self, mut layout: Layout, moving: &layout::Moving) -> Layout {
         let machines = self.machines();
         let threshold = machines
             .iter()
@@ -382,7 +382,7 @@ impl Shared {
         {
             let mut c = self.config.lock();
             c.trusted.remove(id);
-            c.layout.placements.remove(id);
+            c.layout.remove_machine(id);
             c.save();
         }
         let s = self.registry.clone();

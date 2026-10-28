@@ -32,7 +32,7 @@ impl View {
 }
 
 struct Drag {
-    machine: String,
+    moving: crate::layout::Moving,
     layout: Layout,
     view: View,
 }
@@ -44,6 +44,8 @@ pub struct App {
     manual_addr: String,
     code_input: String,
     drag: Option<Drag>,
+    /// Dragging a screen moves only that screen, not its whole computer.
+    separate_screens: bool,
     #[cfg(any(windows, target_os = "macos"))]
     tray: Option<crate::tray::Tray>,
 }
@@ -67,6 +69,7 @@ impl App {
             manual_addr: String::new(),
             code_input: String::new(),
             drag: None,
+            separate_screens: false,
             #[cfg(any(windows, target_os = "macos"))]
             tray,
         }
@@ -397,8 +400,8 @@ impl App {
             }
         };
 
-        let mut drag_started: Option<String> = None;
-        let mut drag_delta: Option<(String, Vec2)> = None;
+        let mut drag_started: Option<crate::layout::Moving> = None;
+        let mut drag_delta: Option<Vec2> = None;
         let mut drag_stopped = false;
         let mut labeled: std::collections::HashSet<String> = Default::default();
 
@@ -412,7 +415,7 @@ impl App {
             let color = machine_color(&m.machine, local);
             let resp = ui.interact(rect, ui.id().with(("monitor", i)), Sense::drag());
             let hovered =
-                resp.hovered() || self.drag.as_ref().is_some_and(|d| d.machine == m.machine);
+                resp.hovered() || self.drag.as_ref().is_some_and(|d| d.moving.includes(m));
             painter.rect_filled(
                 rect,
                 4.0,
@@ -441,10 +444,14 @@ impl App {
                 ui.visuals().strong_text_color(),
             );
             if resp.drag_started() {
-                drag_started = Some(m.machine.clone());
+                drag_started = Some(if self.separate_screens {
+                    crate::layout::Moving::Screen(m.machine.clone(), m.native.clone())
+                } else {
+                    crate::layout::Moving::Machine(m.machine.clone())
+                });
             }
             if resp.dragged() {
-                drag_delta = Some((m.machine.clone(), resp.drag_delta()));
+                drag_delta = Some(resp.drag_delta());
             }
             if resp.drag_stopped() {
                 drag_stopped = true;
@@ -462,24 +469,23 @@ impl App {
             }
         }
 
-        if let Some(machine) = drag_started {
+        if let Some(moving) = drag_started {
             self.drag = Some(Drag {
-                machine,
+                moving,
                 layout: layout.clone(),
                 view,
             });
         }
-        if let (Some(d), Some((machine, delta))) = (self.drag.as_mut(), drag_delta) {
-            if d.machine == machine {
-                if let Some(p) = d.layout.placements.get_mut(&machine) {
-                    p.x += (delta.x / d.view.scale) as f64;
-                    p.y += (delta.y / d.view.scale) as f64;
-                }
-            }
+        if let (Some(d), Some(delta)) = (self.drag.as_mut(), drag_delta) {
+            let (dx, dy) = (
+                (delta.x / d.view.scale) as f64,
+                (delta.y / d.view.scale) as f64,
+            );
+            d.moving.shift(&mut d.layout, dx, dy);
         }
         if drag_stopped {
             if let Some(d) = self.drag.take() {
-                let snapped = self.shared.snap_layout(d.layout, &d.machine);
+                let snapped = self.shared.snap_layout(d.layout, &d.moving);
                 self.shared.set_layout(snapped);
             }
         }
@@ -501,6 +507,27 @@ impl App {
             }
             if changed && self.drag.is_none() {
                 self.shared.set_layout(layout);
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.separate_screens, "Move screens one at a time")
+                .on_hover_text(
+                    "Drag a single screen away from the other screens of the same computer.",
+                );
+            for (id, mons) in &machines {
+                if mons.len() < 2 || !layout.has_separate_screens(id) {
+                    continue;
+                }
+                let name = names.get(id).cloned().unwrap_or_default();
+                if ui
+                    .button(format!("Rejoin {name}'s screens"))
+                    .on_hover_text("Put them back the way the computer itself arranges them.")
+                    .clicked()
+                {
+                    let mut layout = self.shared.config.lock().layout.clone();
+                    layout.join_screens(id);
+                    self.shared.set_layout(layout);
+                }
             }
         });
         self.speed_controls(ui, &machines, &names, &my_id);
@@ -563,7 +590,10 @@ impl App {
             "Share copied text, images and files between computers",
         )
         .on_hover_text("Copied files travel when the cursor crosses, up to 500 MB in total.");
-        ui.checkbox(&mut s.drag_files, "Drag files from one computer to the other");
+        ui.checkbox(
+            &mut s.drag_files,
+            "Drag files from one computer to the other",
+        );
         ui.checkbox(
             &mut s.effects,
             "Liquid ripple where the cursor leaves and enters a screen",

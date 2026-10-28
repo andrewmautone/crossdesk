@@ -3,6 +3,10 @@
 //! Each machine reports its monitors in its own OS coordinates (physical pixels
 //! on Windows, points on macOS). A `Placement` moves and scales that whole group
 //! onto the canvas. Cursor transitions happen in canvas space.
+//!
+//! A single screen can also be moved apart from the rest of its machine: its
+//! extra offset sits in `placements` under `screen_key`, where older builds
+//! simply never look it up.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -58,9 +62,72 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// Extra offset of one screen, in its machine's own units.
+    pub fn screen_offset(&self, machine: &str, m: &Monitor) -> (f64, f64) {
+        self.placements
+            .get(&screen_key(machine, m))
+            .map_or((0.0, 0.0), |p| (p.x, p.y))
+    }
+
+    pub fn shift_screen(&mut self, machine: &str, m: &Monitor, dx: f64, dy: f64) {
+        let p = self
+            .placements
+            .entry(screen_key(machine, m))
+            .or_insert(Placement {
+                x: 0.0,
+                y: 0.0,
+                scale: 1.0,
+            });
+        p.x += dx;
+        p.y += dy;
+    }
+
+    /// True if any screen of `machine` was moved apart from the others.
+    pub fn has_separate_screens(&self, machine: &str) -> bool {
+        let prefix = screen_key_prefix(machine);
+        self.placements
+            .iter()
+            .any(|(k, p)| k.starts_with(&prefix) && (p.x != 0.0 || p.y != 0.0))
+    }
+
+    /// Put every screen of `machine` back where its OS has it. Offsets are
+    /// zeroed, not removed, so the change survives merging with other layouts.
+    pub fn join_screens(&mut self, machine: &str) {
+        let prefix = screen_key_prefix(machine);
+        for (_, p) in self
+            .placements
+            .iter_mut()
+            .filter(|(k, _)| k.starts_with(&prefix))
+        {
+            p.x = 0.0;
+            p.y = 0.0;
+        }
+    }
+
+    /// Forget a machine along with its screens' offsets.
+    pub fn remove_machine(&mut self, machine: &str) {
+        let prefix = screen_key_prefix(machine);
+        self.placements
+            .retain(|k, _| k != machine && !k.starts_with(&prefix));
+    }
+
     /// True if `other` should replace this layout.
     pub fn is_older_than(&self, other: &Layout) -> bool {
         (other.version, other.editor.as_str()) > (self.version, self.editor.as_str())
+    }
+}
+
+fn screen_key_prefix(machine: &str) -> String {
+    format!("{machine}#screen:")
+}
+
+/// Where a screen's own offset is kept in `Layout::placements`.
+pub fn screen_key(machine: &str, m: &Monitor) -> String {
+    let name = m.name.split("|mm=").next().unwrap_or_default();
+    if name.is_empty() {
+        format!("{}{},{}", screen_key_prefix(machine), m.x, m.y)
+    } else {
+        format!("{}{name}", screen_key_prefix(machine))
     }
 }
 
@@ -137,13 +204,14 @@ impl World {
                 continue;
             };
             for m in mons {
+                let (ox, oy) = layout.screen_offset(id, m);
                 monitors.push(WorldMonitor {
                     machine: id.clone(),
                     native: m.clone(),
                     scale: p.scale,
                     rect: Rect {
-                        x: p.x + m.x as f64 * p.scale,
-                        y: p.y + m.y as f64 * p.scale,
+                        x: p.x + (m.x as f64 + ox) * p.scale,
+                        y: p.y + (m.y as f64 + oy) * p.scale,
                         w: m.w as f64 * p.scale,
                         h: m.h as f64 * p.scale,
                     },
@@ -256,10 +324,43 @@ impl World {
     }
 }
 
-/// Snap a machine's placement so its monitors touch another machine's monitors.
+/// What is being dragged on the map: a whole machine, or one of its screens.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Moving {
+    Machine(String),
+    Screen(String, Monitor),
+}
+
+impl Moving {
+    pub fn includes(&self, m: &WorldMonitor) -> bool {
+        match self {
+            Moving::Machine(id) => m.machine == *id,
+            Moving::Screen(id, native) => m.machine == *id && m.native == *native,
+        }
+    }
+
+    /// Move it by `(dx, dy)` canvas units.
+    pub fn shift(&self, layout: &mut Layout, dx: f64, dy: f64) {
+        match self {
+            Moving::Machine(id) => {
+                if let Some(p) = layout.placements.get_mut(id) {
+                    p.x += dx;
+                    p.y += dy;
+                }
+            }
+            Moving::Screen(id, m) => {
+                let scale = layout.placements.get(id).map_or(1.0, |p| p.scale);
+                layout.shift_screen(id, m, dx / scale, dy / scale);
+            }
+        }
+    }
+}
+
+/// Snap what moved so its screens touch the other screens: another machine's,
+/// or for a single screen, also its own machine's.
 pub fn snap(
     layout: &mut Layout,
-    moving: &str,
+    moving: &Moving,
     machines: &[(String, Vec<Monitor>)],
     threshold: f64,
 ) {
@@ -267,13 +368,16 @@ pub fn snap(
     let mine: Vec<Rect> = world
         .monitors
         .iter()
-        .filter(|m| m.machine == moving)
+        .filter(|m| moving.includes(m))
         .map(|m| m.rect)
         .collect();
     let others: Vec<Rect> = world
         .monitors
         .iter()
-        .filter(|m| m.machine != moving)
+        .filter(|m| match moving {
+            Moving::Machine(id) => m.machine != *id,
+            Moving::Screen(..) => !moving.includes(m),
+        })
         .map(|m| m.rect)
         .collect();
     let mut best_dx: Option<f64> = None;
@@ -314,10 +418,7 @@ pub fn snap(
             }
         }
     }
-    if let Some(p) = layout.placements.get_mut(moving) {
-        p.x += best_dx.unwrap_or(0.0);
-        p.y += best_dy.unwrap_or(0.0);
-    }
+    moving.shift(layout, best_dx.unwrap_or(0.0), best_dy.unwrap_or(0.0));
 }
 
 #[cfg(test)]
@@ -392,9 +493,50 @@ mod tests {
         let (machines, mut layout) = two_machines();
         layout.placements.get_mut("mac").unwrap().x = 1930.0;
         layout.placements.get_mut("mac").unwrap().y = 12.0;
-        snap(&mut layout, "mac", &machines, 40.0);
+        snap(&mut layout, &Moving::Machine("mac".into()), &machines, 40.0);
         let p = layout.placements["mac"];
         assert_eq!((p.x, p.y), (1920.0, 0.0));
+    }
+
+    #[test]
+    fn one_screen_moves_apart_and_comes_back() {
+        let machines = vec![
+            (
+                "pc".to_string(),
+                vec![mon(0, 0, 1920, 1080), mon(1920, 0, 1920, 1080)],
+            ),
+            ("mac".to_string(), vec![mon(0, 0, 1440, 900)]),
+        ];
+        let (_, mut layout) = two_machines();
+        layout.placements.get_mut("mac").unwrap().x = 3840.0;
+        layout.placements.get_mut("pc").unwrap().scale = 0.5;
+        // Drag the PC's second screen under its first one, a bit off.
+        let second = Moving::Screen("pc".into(), machines[0].1[1].clone());
+        second.shift(&mut layout, -955.0, 545.0);
+        snap(&mut layout, &second, &machines, 30.0);
+        let w = World::build(&machines, &layout);
+        assert_eq!(
+            w.monitors[1].rect,
+            Rect {
+                x: 0.0,
+                y: 540.0,
+                w: 960.0,
+                h: 540.0
+            }
+        );
+        // The first screen and the Mac stayed put.
+        assert_eq!(w.monitors[0].rect.x, 0.0);
+        assert_eq!(w.monitors[2].rect.x, 3840.0);
+        assert!(layout.has_separate_screens("pc"));
+        assert!(!layout.has_separate_screens("mac"));
+        // A whole-machine drag carries the moved screen along.
+        Moving::Machine("pc".into()).shift(&mut layout, 10.0, 0.0);
+        assert_eq!(World::build(&machines, &layout).monitors[1].rect.x, 10.0);
+        layout.join_screens("pc");
+        assert!(!layout.has_separate_screens("pc"));
+        assert_eq!(World::build(&machines, &layout).monitors[1].rect.x, 970.0);
+        layout.remove_machine("pc");
+        assert_eq!(layout.placements.keys().collect::<Vec<_>>(), ["mac"]);
     }
 
     #[test]
